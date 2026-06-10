@@ -30,7 +30,7 @@ class State(core.State):
     terminated: Array = jnp.bool_(False)
     truncated: Array = jnp.bool_(False)
     legal_action_mask: Array = INIT_LEGAL_ACTION_MASK  # 64 * 73 = 4672
-    observation: Array = jnp.zeros((8, 8, 119), dtype=jnp.float32)
+    observation: Array = jnp.zeros((8, 8, 119), dtype=jnp.float16)
     _step_count: Array = jnp.int32(0)
     _player_order: Array = jnp.int32([0, 1])  # [0, 1] or [1, 0]
     _x: GameState = GameState()

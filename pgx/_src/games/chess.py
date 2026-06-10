@@ -222,15 +222,18 @@ class Game:
         return state
 
     def observe(self, state: GameState, color: Optional[Array] = None) -> Array:
+        # float16: the (8, 8, 119) observation write is bandwidth-bound at training batch
+        # sizes. 117 of 119 planes are binary; the two scaled counters round to <=2^-11
+        # relative error. Cast to the compute dtype at the network input.
         if color is None:
             color = state.color
-        ones = jnp.ones((1, 8, 8), dtype=jnp.float32)
+        ones = jnp.ones((1, 8, 8), dtype=jnp.float16)
 
         def make(i):
             board = jnp.rot90(state.board_history[i].reshape((8, 8)), k=1)
 
             def piece_feat(p):
-                return (board == p).astype(jnp.float32)
+                return (board == p).astype(jnp.float16)
 
             my_pieces = jax.vmap(piece_feat)(jnp.arange(1, 7))
             opp_pieces = jax.vmap(piece_feat)(-jnp.arange(1, 7))
@@ -246,9 +249,9 @@ class Game:
             [
                 jax.vmap(make)(jnp.arange(8)).reshape(-1, 8, 8),  # board feature
                 color * ones,  # color
-                (state.step_count / MAX_TERMINATION_STEPS) * ones,  # total move count
+                (state.step_count.astype(jnp.float16) / MAX_TERMINATION_STEPS) * ones,  # total move count
                 state.castling_rights.flatten()[:, None, None] * ones,  # (my queen, my king, opp queen, opp king)
-                (state.halfmove_count.astype(jnp.float32) / 100.0) * ones,  # no progress count
+                (state.halfmove_count.astype(jnp.float16) / 100.0) * ones,  # no progress count
             ]
         ).transpose((1, 2, 0))
 
