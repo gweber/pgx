@@ -21,6 +21,7 @@ kept alive until upstreamed.
 | **Bug fix**: `INIT_ZOBRIST_HASH` was a hardcoded constant that went stale when JAX's PRNG changed; repetitions involving the start position were counted one short | derived from the tables at import time ([upstream PR #1320](https://github.com/sotetsuk/pgx/pull/1320)) |
 | **Bug fix**: `from_fen` inherited the startpos hash/board as phantom history ([upstream PR #1319](https://github.com/sotetsuk/pgx/pull/1319)) | clean history after FEN restore |
 | `hash_history` 513 -> 101 entries (the 50-move rule bounds repetition lookback exactly) | -3.3 KB/state, 5x cheaper repetition scans |
+| `board` as int8 (pieces in [-6, 6]) | -192 B/state |
 | `board_history` as int8; `is_terminal` reuses the stored hash | -1.5 KB/state |
 | Zobrist XOR-reduce built from sum/shift bit-parity (`xor_reduce`) | jax-metal / Apple GPU support ([upstream PR #1317](https://github.com/sotetsuk/pgx/pull/1317)) |
 
@@ -35,6 +36,7 @@ kept alive until upstreamed.
 | Chain stat accumulation via `segment_sum` instead of O(n^2) all-pairs comparison | `game.step` 1.32 -> 0.50 ms at batch 2048 (2.6x) |
 | `board_history` as int8 | -8.7 KB/state (19x19: 18.8 KB -> 10.1 KB) |
 | `chain_stats` cached in state: `legal_action_mask` (board t+1) and the next `_apply_action` (same board) each recomputed `_count` | step+mask 1.17 -> 0.84 ms at batch 2048 (1.4x); trade-off: +4.3 KB/state |
+| `board` as int16 (chain ids <= 361) | -722 B/state |
 
 ### Misc
 

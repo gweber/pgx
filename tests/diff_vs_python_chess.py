@@ -64,7 +64,7 @@ def encode(mv: pychess.Move, black: bool) -> int:
 def state_from_board(board: pychess.Board) -> C.GameState:
     """Build a GameState from a python-chess board (current player always positive/up)."""
     black = board.turn == pychess.BLACK
-    arr = np.zeros(64, dtype=np.int32)
+    arr = np.zeros(64, dtype=np.int8)
     for sq, piece in board.piece_map().items():
         sign = 1 if (piece.color == board.turn) else -1
         arr[pgx_sq(sq, black)] = sign * piece.piece_type

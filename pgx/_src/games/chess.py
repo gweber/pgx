@@ -28,7 +28,7 @@ HASH_HISTORY_LEN = 101  # repetition lookback window, bounded by the 50-move rul
 # prepare precomputed values here (e.g., available moves, map to label, etc.)
 
 # index: a1: 0, a2: 1, ..., h8: 63
-INIT_BOARD = jnp.int32([4, 1, 0, 0, 0, 0, -1, -4, 2, 1, 0, 0, 0, 0, -1, -2, 3, 1, 0, 0, 0, 0, -1, -3, 5, 1, 0, 0, 0, 0, -1, -5, 6, 1, 0, 0, 0, 0, -1, -6, 3, 1, 0, 0, 0, 0, -1, -3, 2, 1, 0, 0, 0, 0, -1, -2, 4, 1, 0, 0, 0, 0, -1, -4])  # fmt: skip
+INIT_BOARD = jnp.int8([4, 1, 0, 0, 0, 0, -1, -4, 2, 1, 0, 0, 0, 0, -1, -2, 3, 1, 0, 0, 0, 0, -1, -3, 5, 1, 0, 0, 0, 0, -1, -5, 6, 1, 0, 0, 0, 0, -1, -6, 3, 1, 0, 0, 0, 0, -1, -3, 2, 1, 0, 0, 0, 0, -1, -2, 4, 1, 0, 0, 0, 0, -1, -4])  # fmt: skip
 # 8  7 15 23 31 39 47 55 63
 # 7  6 14 22 30 38 46 54 62
 # 6  5 13 21 29 37 45 53 61
@@ -180,7 +180,7 @@ INIT_ZOBRIST_HASH = _init_zobrist_hash()
 
 class GameState(NamedTuple):
     color: Array = jnp.int32(0)  # w: 0, b: 1
-    board: Array = INIT_BOARD  # (64,)
+    board: Array = INIT_BOARD  # (64,), int8: pieces in [-6, 6]
     castling_rights: Array = jnp.ones([2, 2], dtype=jnp.bool_)  # my queen, my king, opp queen, opp king
     en_passant: Array = jnp.int32(-1)
     halfmove_count: Array = jnp.int32(0)  # number of moves since the last piece capture or pawn move
@@ -189,7 +189,7 @@ class GameState(NamedTuple):
     # halfmove_count >= 100, so two identical positions can never lie further apart than the
     # halfmove window — any capture/pawn move in between changes the position irreversibly.
     hash_history: Array = jnp.zeros((HASH_HISTORY_LEN, 2), dtype=jnp.uint32).at[0].set(INIT_ZOBRIST_HASH)
-    board_history: Array = jnp.zeros((8, 64), dtype=jnp.int8).at[0, :].set(INIT_BOARD.astype(jnp.int8))
+    board_history: Array = jnp.zeros((8, 64), dtype=jnp.int8).at[0, :].set(INIT_BOARD)
     legal_action_mask: Array = INIT_LEGAL_ACTION_MASK
     step_count: Array = jnp.int32(0)
 
@@ -312,7 +312,7 @@ def _apply_move(state: GameState, a: Action) -> GameState:
     is_en_passant = (state.en_passant >= 0) & (piece == PAWN) & (state.en_passant == a.to)
     removed_pawn_pos = a.to - 1
     state = state._replace(
-        board=state.board.at[removed_pawn_pos].set(lax.select(is_en_passant, EMPTY, state.board[removed_pawn_pos]))
+        board=state.board.at[removed_pawn_pos].set(lax.select(is_en_passant, jnp.int8(EMPTY), state.board[removed_pawn_pos]))
     )
     is_en_passant = (piece == PAWN) & (jnp.abs(a.to - a.from_) == 2)
     state = state._replace(en_passant=lax.select(is_en_passant, (a.to + a.from_) // 2, -1))
@@ -333,9 +333,9 @@ def _apply_move(state: GameState, a: Action) -> GameState:
     cond = jnp.bool_([[(a.from_ != 32) & (a.from_ != 0), (a.from_ != 32) & (a.from_ != 56)], [a.to != 7, a.to != 63]])
     state = state._replace(castling_rights=state.castling_rights & cond)
     # promotion to queen
-    piece = lax.select((piece == PAWN) & (a.from_ % 8 == 6) & (a.underpromotion < 0), QUEEN, piece)
+    piece = lax.select((piece == PAWN) & (a.from_ % 8 == 6) & (a.underpromotion < 0), jnp.int8(QUEEN), piece)
     # underpromotion
-    piece = lax.select(a.underpromotion < 0, piece, jnp.int32([ROOK, BISHOP, KNIGHT])[a.underpromotion])
+    piece = lax.select(a.underpromotion < 0, piece, jnp.int8([ROOK, BISHOP, KNIGHT])[a.underpromotion])
     # actually move
     state = state._replace(board=state.board.at[a.from_].set(EMPTY).at[a.to].set(piece))  # type: ignore
     return state

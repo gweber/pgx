@@ -52,7 +52,7 @@ def from_fen(fen: str):
     castling_rights = jnp.bool_([["Q" in castling, "K" in castling], ["q" in castling, "k" in castling]])
     if color == "b":
         castling_rights = castling_rights[::-1]
-    mat = jnp.int32(arr).reshape(8, 8)
+    mat = jnp.int8(arr).reshape(8, 8)
     if color == "b":
         mat = -jnp.flip(mat, axis=0)
     ep = jnp.int32(-1) if en_passant == "-" else jnp.int32("abcdefgh".index(en_passant[0]) * 8 + int(en_passant[1]) - 1)

@@ -26,7 +26,7 @@ ZOBRIST_BOARD = jax.random.randint(jax.random.PRNGKey(12345), (3, 19 * 19, 2), 0
 class GameState(NamedTuple):
     step_count: Array = jnp.int32(0)
     # ids of representative stone (smallest) in the connected stones
-    board: Array = jnp.zeros(19 * 19, dtype=jnp.int32)  # b > 0, w < 0, empty = 0
+    board: Array = jnp.zeros(19 * 19, dtype=jnp.int16)  # b > 0, w < 0, empty = 0; chain ids fit int16
     board_history: Array = jnp.full((8, 19 * 19), 2, dtype=jnp.int8)  # for obs; values in {-1, 0, 1, 2}
     num_captured: Array = jnp.zeros(2, dtype=jnp.int32)  # (b, w)
     consecutive_pass_count: Array = jnp.int32(0)
@@ -55,7 +55,7 @@ class Game:
 
     def init(self) -> GameState:
         return GameState(
-            board=jnp.zeros(self.size**2, dtype=jnp.int32),
+            board=jnp.zeros(self.size**2, dtype=jnp.int16),
             board_history=jnp.full((self.history_length, self.size**2), 2, dtype=jnp.int8),
             hash_history=jnp.zeros((self.max_termination_steps, 2), dtype=jnp.uint32),
             chain_stats=jnp.zeros((3, self.size**2), dtype=jnp.int32),  # _count of an empty board
@@ -159,7 +159,7 @@ def _apply_action(state: GameState, action, size) -> GameState:
     )
 
     # set stone
-    state = state._replace(board=state.board.at[action].set((action + 1) * my_sign))
+    state = state._replace(board=state.board.at[action].set(((action + 1) * my_sign).astype(state.board.dtype)))
 
     # merge adjacent chains
     is_my_chain = state.board[adj_ixs] * my_sign > 0
@@ -201,7 +201,7 @@ def _count(state: GameState, size):
 
 
 def _signs(color):
-    return jnp.int32([[1, -1], [-1, 1]])[color]  # (my_sign, opp_sign)
+    return jnp.int16([[1, -1], [-1, 1]])[color]  # (my_sign, opp_sign)
 
 
 def _adj_ixs(xy, size):
