@@ -128,6 +128,15 @@ for from_ in range(64):
                 break
             BETWEEN[from_, to, i] = c * 8 + r
 
+# BETWEEN_MASK[from, to]: the BETWEEN squares as a 2x-uint32 occupancy bitmask, so a slider's
+# path-clear test is a 2-word AND against the position's occupancy instead of a 6-square gather.
+BETWEEN_MASK = np.zeros((64, 64, 2), dtype=np.uint32)
+for from_ in range(64):
+    for to in range(64):
+        for sq in BETWEEN[from_, to]:
+            if sq >= 0:
+                BETWEEN_MASK[from_, to, sq // 32] |= np.uint32(1) << (sq % 32)
+
 # RAYS[sq, d]: squares along queen-line direction d from sq, nearest first, -1 padded.
 # RAY_DIR[sq, to]: direction index d such that to is on RAYS[sq, d], else -1.
 _DIRS = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
@@ -144,8 +153,8 @@ for sq in range(64):
             RAY_DIR[sq, c * 8 + r] = d
 IS_DIAG_DIR = np.array([dr != 0 and dc != 0 for dr, dc in _DIRS], dtype=np.bool_)
 
-FROM_PLANE, TO_PLANE, INIT_LEGAL_ACTION_MASK, LEGAL_DEST, LEGAL_DEST_NEAR, LEGAL_DEST_FAR, CAN_MOVE, BETWEEN, RAYS, RAY_DIR, IS_DIAG_DIR = (
-    jnp.array(x) for x in (FROM_PLANE, TO_PLANE, INIT_LEGAL_ACTION_MASK, LEGAL_DEST, LEGAL_DEST_NEAR, LEGAL_DEST_FAR, CAN_MOVE, BETWEEN, RAYS, RAY_DIR, IS_DIAG_DIR)
+FROM_PLANE, TO_PLANE, INIT_LEGAL_ACTION_MASK, LEGAL_DEST, LEGAL_DEST_NEAR, LEGAL_DEST_FAR, CAN_MOVE, BETWEEN, BETWEEN_MASK, RAYS, RAY_DIR, IS_DIAG_DIR = (
+    jnp.array(x) for x in (FROM_PLANE, TO_PLANE, INIT_LEGAL_ACTION_MASK, LEGAL_DEST, LEGAL_DEST_NEAR, LEGAL_DEST_FAR, CAN_MOVE, BETWEEN, BETWEEN_MASK, RAYS, RAY_DIR, IS_DIAG_DIR)
 )
 
 keys = jax.random.split(jax.random.PRNGKey(12345), 4)
@@ -348,6 +357,7 @@ def _legal_action_mask(state: GameState) -> Array:
     # then every pseudo-legal move is decided by table lookups — no per-move make/unmake.
     # En passant is the lone exception (two candidate moves, validated by make-move).
     board = state.board
+    occ = _occupancy(board)
     king_pos = jnp.argmin(jnp.abs(board - KING))
 
     # opponent pieces currently giving check
@@ -362,8 +372,7 @@ def _legal_action_mask(state: GameState) -> Array:
         ok = (to >= 0) & (board[to] < 0)
         piece = jnp.abs(board[to])
         ok &= (piece == QUEEN) | (piece == ROOK) | (piece == BISHOP)
-        between_ixs = BETWEEN[king_pos, to]
-        ok &= CAN_MOVE[piece, king_pos, to] & ((between_ixs < 0) | (board[between_ixs] == EMPTY)).all()
+        ok &= CAN_MOVE[piece, king_pos, to] & ~jnp.any(occ & BETWEEN_MASK[king_pos, to] != 0)
         return jnp.where(ok, to, -1)
 
     checker_sqs = jnp.hstack((
@@ -400,8 +409,9 @@ def _legal_action_mask(state: GameState) -> Array:
     # squares the king may not step onto, with the king itself lifted off the board
     # (a slider keeps attacking "through" the square the king vacates)
     board_wo_king = board.at[king_pos].set(EMPTY)
+    occ_wo_king = occ & ~_square_mask(king_pos)
     king_dests = LEGAL_DEST[KING, king_pos]
-    danger = jax.vmap(lambda to: (to >= 0) & _is_attacked(board_wo_king, to))(king_dests)
+    danger = jax.vmap(lambda to: (to >= 0) & _is_attacked(board_wo_king, occ_wo_king, to))(king_dests)
     king_danger = jnp.zeros(65, dtype=jnp.bool_).at[jnp.where(danger, king_dests, 64)].set(True)[:64]
 
     def legal_normal_moves(from_):
@@ -409,8 +419,7 @@ def _legal_action_mask(state: GameState) -> Array:
 
         def legal_label(to):
             ok = (from_ >= 0) & (piece > 0) & (to >= 0) & (board[to] <= 0)
-            between_ixs = BETWEEN[from_, to]
-            ok &= CAN_MOVE[piece, from_, to] & ((between_ixs < 0) | (board[between_ixs] == EMPTY)).all()
+            ok &= CAN_MOVE[piece, from_, to] & ~jnp.any(occ & BETWEEN_MASK[from_, to] != 0)
             c0, c1 = from_ // 8, to // 8
             pawn_should = ((c1 == c0) & (board[to] == EMPTY)) | ((c1 != c0) & (board[to] < 0))
             ok &= (piece != PAWN) | pawn_should
@@ -463,7 +472,7 @@ def _legal_action_mask(state: GameState) -> Array:
     can_castle_queen_side &= (b[0] == ROOK) & (b[8] == EMPTY) & (b[16] == EMPTY) & (b[24] == EMPTY) & (b[32] == KING)
     can_castle_king_side = state.castling_rights[0, 1]
     can_castle_king_side &= (b[32] == KING) & (b[40] == EMPTY) & (b[48] == EMPTY) & (b[56] == ROOK)
-    not_checked = ~jax.vmap(_is_attacked, in_axes=(None, 0))(state.board, jnp.int32([16, 24, 32, 40, 48]))
+    not_checked = ~jax.vmap(_is_attacked, in_axes=(None, None, 0))(state.board, occ, jnp.int32([16, 24, 32, 40, 48]))
     mask = mask.at[2364].set(mask[2364] | (can_castle_queen_side & not_checked[:3].all()))
     mask = mask.at[2367].set(mask[2367] | (can_castle_king_side & not_checked[2:].all()))
 
@@ -474,13 +483,24 @@ def _legal_action_mask(state: GameState) -> Array:
     return mask[:-1]
 
 
-def _is_attacked(board: Array, pos: Array):
+def _occupancy(board: Array) -> Array:
+    # (2,) uint32 bitboard of occupied squares; bit i of word w covers square w * 32 + i
+    bits = (board != EMPTY).reshape(2, 32)
+    weights = jnp.uint32(1) << jnp.arange(32, dtype=jnp.uint32)
+    return jnp.sum(jnp.where(bits, weights, jnp.uint32(0)), axis=1, dtype=jnp.uint32)
+
+
+def _square_mask(pos: Array) -> Array:
+    # (2,) uint32 bitboard with only `pos` set
+    return jnp.where(jnp.arange(2) == pos // 32, jnp.uint32(1) << (pos % 32).astype(jnp.uint32), jnp.uint32(0))
+
+
+def _is_attacked(board: Array, occ: Array, pos: Array):
     def attacked_far(to):
         ok = (to >= 0) & (board[to] < 0)  # should be opponent's
         piece = jnp.abs(board[to])
         ok &= (piece == QUEEN) | (piece == ROOK) | (piece == BISHOP)
-        between_ixs = BETWEEN[pos, to]
-        ok &= CAN_MOVE[piece, pos, to] & ((between_ixs < 0) | (board[between_ixs] == EMPTY)).all()
+        ok &= CAN_MOVE[piece, pos, to] & ~jnp.any(occ & BETWEEN_MASK[pos, to] != 0)
         return ok
 
     def attacked_near(to):
@@ -497,7 +517,7 @@ def _is_attacked(board: Array, pos: Array):
 
 def _is_checked(state: GameState):
     king_pos = jnp.argmin(jnp.abs(state.board - KING))
-    return _is_attacked(state.board, king_pos)
+    return _is_attacked(state.board, _occupancy(state.board), king_pos)
 
 
 def _zobrist_hash(state: GameState) -> Array:
