@@ -23,6 +23,7 @@ from pgx._src.utils import xor_reduce
 
 EMPTY, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING = tuple(range(7))  # opponent: -1 * piece
 MAX_TERMINATION_STEPS = 512  # from AlphaZero paper
+HASH_HISTORY_LEN = 101  # repetition lookback window, bounded by the 50-move rule
 
 # prepare precomputed values here (e.g., available moves, map to label, etc.)
 
@@ -152,7 +153,20 @@ ZOBRIST_BOARD = jax.random.randint(keys[0], shape=(64, 13, 2), minval=0, maxval=
 ZOBRIST_SIDE = jax.random.randint(keys[1], shape=(2,), minval=0, maxval=2**31 - 1, dtype=jnp.uint32)
 ZOBRIST_CASTLING = jax.random.randint(keys[2], shape=(4, 2), minval=0, maxval=2**31 - 1, dtype=jnp.uint32)
 ZOBRIST_EN_PASSANT = jax.random.randint(keys[3], shape=(65, 2), minval=0, maxval=2**31 - 1, dtype=jnp.uint32)
-INIT_ZOBRIST_HASH = jnp.uint32([1455170221, 1478960862])
+
+
+def _init_zobrist_hash() -> Array:
+    # Derived from the tables above instead of hardcoded: the tables come from jax.random,
+    # whose outputs are not stable across JAX versions — a stale constant silently breaks
+    # repetition counting for the initial position.
+    hash_ = ZOBRIST_SIDE  # color == 0
+    hash_ ^= xor_reduce(ZOBRIST_BOARD[jnp.arange(64), INIT_BOARD + 6], 0)
+    hash_ ^= xor_reduce(ZOBRIST_CASTLING, 0)  # all castling rights
+    hash_ ^= ZOBRIST_EN_PASSANT[-1]  # en_passant == -1
+    return hash_
+
+
+INIT_ZOBRIST_HASH = _init_zobrist_hash()
 
 
 class GameState(NamedTuple):
@@ -162,8 +176,11 @@ class GameState(NamedTuple):
     en_passant: Array = jnp.int32(-1)
     halfmove_count: Array = jnp.int32(0)  # number of moves since the last piece capture or pawn move
     fullmove_count: Array = jnp.int32(1)  # increase every black move
-    hash_history: Array = jnp.zeros((MAX_TERMINATION_STEPS + 1, 2), dtype=jnp.uint32).at[0].set(INIT_ZOBRIST_HASH)
-    board_history: Array = jnp.zeros((8, 64), dtype=jnp.int32).at[0, :].set(INIT_BOARD)
+    # 101 entries (current + 100) suffice for exact repetition detection: the game ends at
+    # halfmove_count >= 100, so two identical positions can never lie further apart than the
+    # halfmove window — any capture/pawn move in between changes the position irreversibly.
+    hash_history: Array = jnp.zeros((HASH_HISTORY_LEN, 2), dtype=jnp.uint32).at[0].set(INIT_ZOBRIST_HASH)
+    board_history: Array = jnp.zeros((8, 64), dtype=jnp.int8).at[0, :].set(INIT_BOARD.astype(jnp.int8))
     legal_action_mask: Array = INIT_LEGAL_ACTION_MASK
     step_count: Array = jnp.int32(0)
 
@@ -250,7 +267,7 @@ class Game:
 
 def _update_history(state: GameState):
     board_history = jnp.roll(state.board_history, 64)
-    board_history = board_history.at[0].set(state.board)
+    board_history = board_history.at[0].set(state.board.astype(jnp.int8))
     hash_hist = jnp.roll(state.hash_history, 2)
     hash_hist = hash_hist.at[0].set(_zobrist_hash(state))
     return state._replace(board_history=board_history, hash_history=hash_hist)
