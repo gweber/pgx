@@ -382,12 +382,13 @@ def _legal_action_mask(state: GameState) -> Array:
         jax.vmap(near_checker)(LEGAL_DEST_NEAR[king_pos]),
         jax.vmap(far_checker)(LEGAL_DEST_FAR[king_pos]),
     ))
-    checker_mask = jnp.zeros(65, dtype=jnp.bool_).at[checker_sqs].set(True)[:64]
+    # vector bool scatter-set miscompiles on jax-metal; int scatter-add is portable
+    checker_mask = jnp.zeros(65, dtype=jnp.int32).at[checker_sqs].add(1)[:64] > 0
     num_checkers = checker_mask.sum()
     single_checker = jnp.argmax(checker_mask)
 
     # non-king moves must capture the single checker or block its line (none if double check)
-    blocking_mask = jnp.zeros(65, dtype=jnp.bool_).at[BETWEEN[king_pos, single_checker]].set(True)[:64]
+    blocking_mask = jnp.zeros(65, dtype=jnp.int32).at[BETWEEN[king_pos, single_checker]].add(1)[:64] > 0
     check_target = jnp.where(
         num_checkers == 0,
         jnp.ones(64, dtype=jnp.bool_),
@@ -407,7 +408,7 @@ def _legal_action_mask(state: GameState) -> Array:
         return jnp.where(first_is_mine & slider, ray[i1], -1)
 
     pinned_sqs = jax.vmap(pin_dir)(jnp.arange(8))
-    pinned_dir = jnp.full(65, -1, dtype=jnp.int32).at[pinned_sqs].set(jnp.arange(8, dtype=jnp.int32))
+    pinned_dir = jnp.zeros(65, dtype=jnp.int32).at[pinned_sqs].add(jnp.arange(8, dtype=jnp.int32) + 1) - 1
 
     # squares the king may not step onto, with the king itself lifted off the board
     # (a slider keeps attacking "through" the square the king vacates)
@@ -418,7 +419,7 @@ def _legal_action_mask(state: GameState) -> Array:
     # each of which would otherwise run a full _is_attacked probe — the heaviest per-step waste.
     king_dests = LEGAL_DEST[KING, king_pos, :8]
     danger = jax.vmap(lambda to: (to >= 0) & _is_attacked(board_wo_king, occ_wo_king, to))(king_dests)
-    king_danger = jnp.zeros(65, dtype=jnp.bool_).at[jnp.where(danger, king_dests, 64)].set(True)[:64]
+    king_danger = jnp.zeros(65, dtype=jnp.int32).at[jnp.where(danger, king_dests, 64)].add(1)[:64] > 0
 
     def legal_normal_moves(from_):
         piece = board[from_]
@@ -464,13 +465,13 @@ def _legal_action_mask(state: GameState) -> Array:
     # normal moves (already fully legal thanks to the masks above)
     possible_piece_positions = jnp.nonzero(state.board > 0, size=16, fill_value=-1)[0]
     a1 = jax.vmap(legal_normal_moves)(possible_piece_positions).flatten()
-    mask = jnp.zeros(64 * 73 + 1, dtype=jnp.bool_)  # +1 for sentinel
-    mask = mask.at[a1].set(True)
+    mask = jnp.zeros(64 * 73 + 1, dtype=jnp.int32)  # +1 for sentinel
+    mask = mask.at[a1].add(1)
 
     # en passant: rare and full of edge cases (rank pins, capturing the checker) — make-move test
     a2 = legal_en_passants()
     a2 = jnp.where(jax.vmap(is_not_checked)(a2), a2, -1)
-    mask = mask.at[a2].set(True)
+    mask = mask.at[a2].add(1)
 
     # castling
     b = state.board
@@ -479,14 +480,14 @@ def _legal_action_mask(state: GameState) -> Array:
     can_castle_king_side = state.castling_rights[0, 1]
     can_castle_king_side &= (b[32] == KING) & (b[40] == EMPTY) & (b[48] == EMPTY) & (b[56] == ROOK)
     not_checked = ~jax.vmap(_is_attacked, in_axes=(None, None, 0))(state.board, occ, jnp.int32([16, 24, 32, 40, 48]))
-    mask = mask.at[2364].set(mask[2364] | (can_castle_queen_side & not_checked[:3].all()))
-    mask = mask.at[2367].set(mask[2367] | (can_castle_king_side & not_checked[2:].all()))
+    mask = mask.at[2364].add((can_castle_queen_side & not_checked[:3].all()).astype(jnp.int32))
+    mask = mask.at[2367].add((can_castle_king_side & not_checked[2:].all()).astype(jnp.int32))
 
     # set underpromotions
-    actions = legal_underpromotions(mask)
-    mask = mask.at[actions].set(True)
+    actions = legal_underpromotions(mask > 0)
+    mask = mask.at[actions].add(1)
 
-    return mask[:-1]
+    return mask[:-1] > 0
 
 
 def _occupancy(board: Array) -> Array:
