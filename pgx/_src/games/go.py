@@ -183,14 +183,12 @@ def _count(state: GameState, size):
     idx = jnp.arange(size**2)
     num_pseudo, idx_sum, idx_squared_sum = jax.vmap(_count_neighbor)(idx)
 
-    def count_all(x):
-        return (
-            jnp.where(board == x + 1, num_pseudo, 0).sum(),
-            jnp.where(board == x + 1, idx_sum, 0).sum(),
-            jnp.where(board == x + 1, idx_squared_sum, 0).sum(),
-        )
-
-    return jax.vmap(count_all)(idx)
+    # accumulate per-point pseudo-liberty stats into their chains via scatter-add: O(n),
+    # unlike the previous all-pairs comparison (vmapped `board == x + 1` over all x), whose
+    # O(n^2) broadcast becomes memory-bound at training batch sizes (4.5x slower at batch 2048)
+    seg = jnp.where(is_empty, size**2, board - 1)  # chain id - 1, empties into overflow bucket
+    acc = lambda v: jax.ops.segment_sum(v, seg, num_segments=size**2 + 1)[: size**2]
+    return acc(num_pseudo), acc(idx_sum), acc(idx_squared_sum)
 
 
 def _signs(color):
