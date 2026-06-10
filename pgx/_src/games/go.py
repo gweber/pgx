@@ -33,6 +33,11 @@ class GameState(NamedTuple):
     ko: Array = jnp.int32(-1)  # by SSK
     is_psk: Array = jnp.bool_(False)
     hash_history: Array = jnp.zeros((19 * 19 * 2, 2), dtype=jnp.uint32)
+    # cached _count(board): (num_pseudo, idx_sum, idx_squared_sum), refreshed in step().
+    # legal_action_mask (board t+1) and the next _apply_action (same board) used to each
+    # recompute it — caching halves the per-ply chain-stat work. Invariant: rebuild this
+    # whenever board is modified outside step().
+    chain_stats: Array = jnp.zeros((3, 19 * 19), dtype=jnp.int32)
 
     @property
     def color(self) -> Array:
@@ -53,6 +58,7 @@ class Game:
             board=jnp.zeros(self.size**2, dtype=jnp.int32),
             board_history=jnp.full((self.history_length, self.size**2), 2, dtype=jnp.int8),
             hash_history=jnp.zeros((self.max_termination_steps, 2), dtype=jnp.uint32),
+            chain_stats=jnp.zeros((3, self.size**2), dtype=jnp.int32),  # _count of an empty board
         )
 
     def step(self, state: GameState, action: Array) -> GameState:
@@ -63,6 +69,9 @@ class Game:
             lambda: _apply_action(state, action, self.size),
             lambda: _apply_pass(state),
         )
+        # refresh the chain-stat cache for the new board (consumed by legal_action_mask
+        # and by _apply_action on the next step)
+        state = state._replace(chain_stats=jnp.stack(_count(state, self.size)))
         # update board history
         board_history = jnp.roll(state.board_history, self.size**2)
         board_history = board_history.at[0].set(jnp.clip(state.board, -1, 1).astype(jnp.int8))
@@ -92,7 +101,7 @@ class Game:
         # some logic is inspired by OpenSpiel's Go implementation
         is_empty = state.board == 0
         my_sign, opp_sign = _signs(state.color)
-        num_pseudo, idx_sum, idx_squared_sum = _count(state, self.size)
+        num_pseudo, idx_sum, idx_squared_sum = state.chain_stats
         chain_ix = jnp.abs(state.board) - 1
         in_atari = (idx_sum[chain_ix] ** 2) == idx_squared_sum[chain_ix] * num_pseudo[chain_ix]
         has_liberty = (state.board * my_sign > 0) & ~in_atari
@@ -134,7 +143,7 @@ def _apply_action(state: GameState, action, size) -> GameState:
     # remove killed stones
     adj_ixs = _adj_ixs(action, size)
     adj_ids = state.board[adj_ixs]
-    num_pseudo, idx_sum, idx_squared_sum = _count(state, size)
+    num_pseudo, idx_sum, idx_squared_sum = state.chain_stats
     chain_ix = jnp.abs(adj_ids) - 1
     is_atari = (idx_sum[chain_ix] ** 2) == idx_squared_sum[chain_ix] * num_pseudo[chain_ix]
     single_liberty = (idx_squared_sum[chain_ix] // idx_sum[chain_ix]) - 1

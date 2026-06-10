@@ -16,6 +16,7 @@ kept alive until upstreamed.
 |---|---|
 | Stockfish-style legal move generation: checkers, pin rays, king-danger squares computed once per position; no per-move make/unmake | `legal_action_mask` 14x faster |
 | Occupancy bitboard (2x uint32) + `BETWEEN_MASK`: slider path-clear test is a 2-word AND | further ~1.3x on full step |
+| `observe` emits float16 (binary planes + movecount exact; halfmove plane rounds at <=2^-11) | observe 0.73 -> 0.42 ms at batch 2048 |
 | **Bug fix**: the old `jnp.nonzero(..., size=200)` compaction silently dropped legal moves in positions with >200 pseudo-legal candidates (multi-queen self-play positions; the known 218-move position returned 200) | exact masks, no cap |
 | **Bug fix**: `INIT_ZOBRIST_HASH` was a hardcoded constant that went stale when JAX's PRNG changed; repetitions involving the start position were counted one short | derived from the tables at import time ([upstream PR #1320](https://github.com/sotetsuk/pgx/pull/1320)) |
 | **Bug fix**: `from_fen` inherited the startpos hash/board as phantom history ([upstream PR #1319](https://github.com/sotetsuk/pgx/pull/1319)) | clean history after FEN restore |
@@ -33,6 +34,7 @@ kept alive until upstreamed.
 | Territory flood fill skipped for non-terminal states (results were computed and discarded every step; under vmap the while_loop runs the batch worst case) | `rewards()` flat ~0.06 ms instead of 0.17-0.71 ms, 3-12x ([upstream PR #1321](https://github.com/sotetsuk/pgx/pull/1321)) |
 | Chain stat accumulation via `segment_sum` instead of O(n^2) all-pairs comparison | `game.step` 1.32 -> 0.50 ms at batch 2048 (2.6x) |
 | `board_history` as int8 | -8.7 KB/state (19x19: 18.8 KB -> 10.1 KB) |
+| `chain_stats` cached in state: `legal_action_mask` (board t+1) and the next `_apply_action` (same board) each recomputed `_count` | step+mask 1.17 -> 0.84 ms at batch 2048 (1.4x); trade-off: +4.3 KB/state |
 
 ### Misc
 
