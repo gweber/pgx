@@ -446,6 +446,35 @@ class Visualizer:
                     "black",
                     "",
                 )
+        elif _state.env_id == "layer_go":
+            from pgx._src.dwg.layer_go import _make_layer_go_dwg
+
+            self.config["GRID_SIZE"] = 25
+            self.config["BOARD_WIDTH"] = 16
+            self.config["BOARD_HEIGHT"] = 5
+            self._make_dwg_group = _make_layer_go_dwg  # type:ignore
+            if (self.config["COLOR_THEME"] is None and self.config["COLOR_THEME"] == "dark") or self.config[
+                "COLOR_THEME"
+            ] == "dark":
+                self.config["COLOR_SET"] = ColorSet(
+                    "black",
+                    "darkgray",
+                    "white",
+                    "white",
+                    "#1e1e1e",
+                    "silver",
+                    "silver",
+                )
+            else:
+                self.config["COLOR_SET"] = ColorSet(
+                    "black",
+                    "white",
+                    "black",
+                    "black",
+                    "white",
+                    "black",
+                    "black",
+                )
         elif _state.env_id == "leduc_holdem":
             from pgx._src.dwg.leduc_holdem import _make_leducHoldem_dwg
 
