@@ -99,6 +99,13 @@ Only the stone arrangement on the 75-point board is compared — never the playe
 and are always legal in non-terminal states. The initial empty board is part of the superko
 history, and every board reached by a legal stone move is added to it; passes add no entry.
 
+For efficiency the history stores a 64-bit (2× `uint32`) additive-Zobrist **hash** of each
+board rather than the full board, so the check is a hash comparison instead of a board-by-board
+scan. The collision probability is negligible (~2⁻⁶⁴ per pair of distinct boards); a collision
+would, at worst, mark one specific legal move illegal in one game — it can never corrupt the
+board or crash. This keeps the per-state history at `(513, 2)` `uint32` (~4 KB) instead of a
+full `(513, 75)` board buffer.
+
 ## Termination
 
 A game ends when one of the following happens:
@@ -176,7 +183,7 @@ game immediately with `-1` for the offending player.
 
 - **Fixed board size.** Only the 5×5×3 board is implemented.
 - **Fixed history size.** Superko history is bounded by the maximum game length (`512` plies),
-  stored as a fixed `(513, 75)` int8 buffer in the state (~38 KB/state).
+  stored as a fixed `(513, 2)` `uint32` Zobrist-hash buffer in the state (~4 KB/state).
 - **Komi is untuned.** `komi = 7.5` is a starting value and has not been balanced for this 3D
   board; it serves to break ties.
 - **No variable-size engine.** Larger Layer Go variants such as 7×7×3 or 5×5×5 are not
