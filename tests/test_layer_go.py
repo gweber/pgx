@@ -3,7 +3,6 @@ import jax.numpy as jnp
 
 import pgx
 from pgx.layer_go import (
-    _EMPTY_HISTORY,
     ACTION_SIZE,
     BOARD_SIZE,
     DEPTH,
@@ -17,6 +16,7 @@ from pgx.layer_go import (
     GameState,
     LayerGo,
     State,
+    _board_hash,
     _is_superko,
     _legal_action_mask,
     _score,
@@ -31,34 +31,34 @@ observe = jax.jit(env.observe)
 
 
 def _history_from_boards(boards):
-    """Build a (MAX_HISTORY, BOARD_SIZE) superko history seeded with `boards` (in order)."""
-    hist = _EMPTY_HISTORY
+    """Build a (MAX_HISTORY, 2) Zobrist superko history seeded with `boards` (in order)."""
+    hist = jnp.zeros((MAX_HISTORY, 2), dtype=jnp.uint32)
     for i, b in enumerate(boards):
-        hist = hist.at[i].set(jnp.int8(b))
+        hist = hist.at[i].set(_board_hash(jnp.int8(b)))
     return hist, jnp.int32(len(boards))
 
 
 def _empty_state(board, color=0, player_order=(0, 1), history_boards=None, step_count=None):
     """Build a State with a hand-crafted board and the given color to move.
 
-    `history_boards` seeds the positional-superko history (defaults to just the empty board,
-    matching a fresh GameState). `step_count` overrides the ply counter (its parity also sets
-    the color unless `color` already encodes it).
+    `history_boards` seeds the positional-superko (hash) history (defaults to just the empty
+    board, matching a fresh GameState). `step_count` overrides the ply counter (its parity also
+    sets the color unless `color` already encodes it).
     """
     if history_boards is None:
-        board_history, num_history = _EMPTY_HISTORY, jnp.int32(1)
+        hash_history, num_history = _history_from_boards([[0] * BOARD_SIZE])
     else:
-        board_history, num_history = _history_from_boards(history_boards)
+        hash_history, num_history = _history_from_boards(history_boards)
     sc = color if step_count is None else step_count
     x = GameState(
         step_count=jnp.int32(sc),
-        board=jnp.int32(board),
-        board_history=board_history,
+        board=jnp.int8(board),
+        hash_history=hash_history,
         num_history=num_history,
     )
     return State(  # type: ignore
         current_player=jnp.int32(player_order[int(sc) % 2]),
-        legal_action_mask=_legal_action_mask(jnp.int32(board), jnp.int32(int(sc) % 2), board_history),
+        legal_action_mask=_legal_action_mask(jnp.int8(board), jnp.int32(int(sc) % 2), hash_history, num_history),
         _player_order=jnp.int32(player_order),
         _x=x,
     )
@@ -514,13 +514,13 @@ def _ko_position():
 
 
 def test_initial_empty_board_in_history():
-    # The empty board is recorded at init, so _is_superko flags it.
+    # The empty board's hash is recorded at init, so _is_superko flags it.
     state = init(jax.random.PRNGKey(0))
-    empty = jnp.zeros(BOARD_SIZE, dtype=jnp.int32)
-    assert bool(_is_superko(state._x.board_history, empty))
+    empty = jnp.zeros(BOARD_SIZE, dtype=jnp.int8)
+    assert bool(_is_superko(state._x.hash_history, state._x.num_history, _board_hash(empty)))
     # A board not in history is not flagged.
-    other = jnp.zeros(BOARD_SIZE, dtype=jnp.int32).at[0].set(1)
-    assert not bool(_is_superko(state._x.board_history, other))
+    other = jnp.zeros(BOARD_SIZE, dtype=jnp.int8).at[0].set(1)
+    assert not bool(_is_superko(state._x.hash_history, state._x.num_history, _board_hash(other)))
 
 
 def test_immediate_ko_recapture_illegal():
@@ -563,12 +563,12 @@ def test_superko_helper_detects_longer_cycle():
     b2[coord_to_index(4, 4, 2)] = -1
     b3 = [0] * BOARD_SIZE
     b3[coord_to_index(2, 2, 1)] = 1
-    hist, _ = _history_from_boards([[0] * BOARD_SIZE, b1, b2, b3])
-    assert bool(_is_superko(hist, jnp.int32(b1)))  # recreating b1 (older board) is a violation
-    assert bool(_is_superko(hist, jnp.int32(b2)))
+    hist, num = _history_from_boards([[0] * BOARD_SIZE, b1, b2, b3])
+    assert bool(_is_superko(hist, num, _board_hash(jnp.int8(b1))))  # recreating b1 (older board) is a violation
+    assert bool(_is_superko(hist, num, _board_hash(jnp.int8(b2))))
     fresh = [0] * BOARD_SIZE
     fresh[coord_to_index(1, 1, 1)] = -1
-    assert not bool(_is_superko(hist, jnp.int32(fresh)))  # never-seen board is fine
+    assert not bool(_is_superko(hist, num, _board_hash(jnp.int8(fresh))))  # never-seen board is fine
 
 
 def test_pass_not_blocked_by_superko_and_terminates():
@@ -589,7 +589,7 @@ def test_pass_not_blocked_by_superko_and_terminates():
 # --------------------------------------------------------------------------- #
 def test_history_shape_and_init():
     state = init(jax.random.PRNGKey(0))
-    assert state._x.board_history.shape == (MAX_HISTORY, BOARD_SIZE)
+    assert state._x.hash_history.shape == (MAX_HISTORY, 2)
     assert int(state._x.num_history) == 1  # only the empty board
 
 
@@ -598,22 +598,22 @@ def test_stone_move_records_history_pass_does_not():
     state = step(state, jnp.int32(coord_to_index(1, 1, 0)))
     assert int(state._x.num_history) == 2  # empty + one stone board
     assert int(state._x.step_count) == 1
-    # the recorded board matches the current board
-    assert bool((state._x.board_history[1] == state._x.board.astype(jnp.int8)).all())
+    # the recorded hash matches the current board's hash
+    assert bool((state._x.hash_history[1] == _board_hash(state._x.board)).all())
     state = step(state, jnp.int32(PASS_ACTION))
     assert int(state._x.num_history) == 2  # pass adds no row
     assert int(state._x.step_count) == 2  # but the ply counter advances
 
 
-def test_unwritten_history_rows_are_sentinel():
-    # Unused rows must never collide with a real board (they hold the sentinel 2).
-    state = init(jax.random.PRNGKey(0))
-    assert int(state._x.board_history[5].min()) == 2
-    assert int(state._x.board_history[5].max()) == 2
-    real = jnp.zeros(BOARD_SIZE, dtype=jnp.int32).at[10].set(-1)
-    # a single real board placed in history is found; sentinel rows are not matched
-    hist, _ = _history_from_boards([[0] * BOARD_SIZE, real])
-    assert bool(_is_superko(hist, real))
+def test_unwritten_history_rows_excluded_by_num_history():
+    # Validity is tracked by num_history: rows at or beyond it are never compared, even if
+    # they happen to hold a real board's hash.
+    planted = [0] * BOARD_SIZE
+    planted[coord_to_index(3, 1, 2)] = -1
+    hist, num = _history_from_boards([[0] * BOARD_SIZE, [0] * BOARD_SIZE])  # num_history = 2
+    hist = hist.at[5].set(_board_hash(jnp.int8(planted)))  # plant a hash at row 5 (>= num_history)
+    assert not bool(_is_superko(hist, num, _board_hash(jnp.int8(planted))))  # masked out by num_history=2
+    assert bool(_is_superko(hist, jnp.int32(6), _board_hash(jnp.int8(planted))))  # visible once num_history>5
 
 
 # --------------------------------------------------------------------------- #
