@@ -17,6 +17,23 @@ A collection of GPU-accelerated parallel game simulators for reinforcement learn
 > [!NOTE] 
 >⭐ If you find this project helpful, we would be grateful for your support through a GitHub star to help us grow the community and motivate further development!
 
+> [!IMPORTANT]
+> ### 🔧 This is the Mushin fork
+> [**gweber/pgx**](https://github.com/gweber/pgx) (integration branch `mushin`) carries performance + correctness work on top of upstream chess/Go for AlphaZero-style self-play, plus a **new 3D Go** environment. `main` mirrors upstream untouched; `mushin` is the integration branch. Full detail and methodology: [`docs/mushin-fork.md`](docs/mushin-fork.md).
+>
+> **Performance** — `vmap`+`jit`, batch 2048, CUDA (GB10):
+>
+> | Environment | Metric | Upstream → Mushin | Gain |
+> |---|---|---|:---:|
+> | Chess | full `Game.step` | 8.30 → 0.50 ms | **16.7×** |
+> | Chess | per-env state size | 11.1 → 6.3 KB | **−43%** |
+> | Go | `game.step` | 1.32 → 0.50 ms | **2.6×** |
+> | Go | `rewards()` (non-terminal) | 0.17–0.71 → ~0.06 ms | **3–12×** |
+>
+> Chess `legal_action_mask` alone is ~**14×** faster (Stockfish-style generation computed once per position). Correctness fixes upstreamed as PRs [#1317](https://github.com/sotetsuk/pgx/pull/1317), [#1319](https://github.com/sotetsuk/pgx/pull/1319), [#1320](https://github.com/sotetsuk/pgx/pull/1320), [#1321](https://github.com/sotetsuk/pgx/pull/1321) (stale Zobrist init, phantom FEN history, a >200-move mask cap that silently dropped legal moves). Validated by differential testing vs `python-chess` and bit-exact Go lockstep playouts.
+>
+> **New game — [Layer Go](docs/layer_go.md):** Go on a compact 5×5×3 3D board (`pgx.make("layer_go")`). See [Supported games](#supported-games).
+
 
 <div align="center">
 <img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/go_dark.gif#gh-dark-mode-only" width="30%"><img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/go_dark.gif#gh-dark-mode-only" width="30%" style="transform:rotate(270deg);"><img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/go_dark.gif#gh-dark-mode-only" width="30%" style="transform:rotate(90deg);">
@@ -126,6 +143,7 @@ Use `pgx.available_envs() -> Tuple[EnvId]` to see the list of currently availabl
 |<a href="https://en.wikipedia.org/wiki/Go_(game)">Go</a><br>`"go_9x9"` `"go_19x19"` |<img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/go-19x19_dark.gif" width="60px"><img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/go-19x19_light.gif" width="60px">| `v1` | *Strategically place stones, claim territory.* |
 |<a href="https://en.wikipedia.org/wiki/Hex_(board_game)">Hex</a><br>`"hex"` |<img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/hex_dark.gif" width="60px"><img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/hex_light.gif" width="60px">| `v0` | *Connect opposite sides, block opponent.* |
 |<a href="https://en.wikipedia.org/wiki/Kuhn_poker">Kuhn Poker</a><br>`"kuhn_poker"` |<img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/kuhn_poker_dark.gif" width="60px"><img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/kuhn_poker_light.gif" width="60px">| `v1` | *Three-card betting and bluffing game.* |
+|<a href="docs/layer_go.md">Layer Go</a> 🔧<br>`"layer_go"` |<img src="https://raw.githubusercontent.com/gweber/pgx/mushin/docs/assets/layer_go_dark.svg#gh-dark-mode-only" width="90px"><img src="https://raw.githubusercontent.com/gweber/pgx/mushin/docs/assets/layer_go.svg#gh-light-mode-only" width="90px">| `v0` | *Go on three stacked layers.* |
 |<a href="https://arxiv.org/abs/1207.1411">Leduc hold'em</a><br>`"leduc_holdem"` |<img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/leduc_holdem_dark.gif" width="60px"><img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/leduc_holdem_light.gif" width="60px">| `v0` | *Two-suit, limited deck poker.* |
 |<a href="https://github.com/kenjyoung/MinAtar">MinAtar/Asterix</a><br>`"minatar-asterix"` |<img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/minatar-asterix.gif" width="50px">| `v1` | *Avoid enemies, collect treasure, survive.* |
 |<a href="https://github.com/kenjyoung/MinAtar">MinAtar/Breakout</a><br>`"minatar-breakout"` |<img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/minatar-breakout.gif" width="50px">| `v1` | *Paddle, ball, bricks, bounce, clear.* |
@@ -137,6 +155,30 @@ Use `pgx.available_envs() -> Tuple[EnvId]` to see the list of currently availabl
 |<a href="https://sugorokuya.jp/p/suzume-jong">Sparrow Mahjong</a><br>`"sparrow_mahjong"` |<img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/sparrow_mahjong_dark.svg" width="60px"><img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/sparrow_mahjong_light.svg" width="60px">|  `v1` | *A simplified, children-friendly Mahjong.* |
 |<a href="https://en.wikipedia.org/wiki/Tic-tac-toe">Tic-tac-toe</a><br>`"tic_tac_toe"` |<img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/tic_tac_toe_dark.gif" width="60px"><img src="https://raw.githubusercontent.com/sotetsuk/pgx/main/docs/assets/tic_tac_toe_light.gif" width="60px">| `v0` | *Three in a row wins.* |
 
+
+### 🔧 Layer Go (new in this fork)
+
+**Layer Go** is a compact 3D Go variant played on a `5 × 5 × 3` orthogonal grid (75 points + pass).
+It keeps the rules of Go — connection, liberties, captures, suicide, passing, area scoring — but
+on a stack of three 5×5 layers connected along the z-axis. Adjacency is **orthogonal only** (up to
+6 neighbours); diagonal touching never connects stones nor grants liberties, and captures work
+across layers exactly like in-plane captures.
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/gweber/pgx/mushin/docs/assets/layer_go_dark.svg#gh-dark-mode-only" width="60%">
+<img src="https://raw.githubusercontent.com/gweber/pgx/mushin/docs/assets/layer_go.svg#gh-light-mode-only" width="60%">
+</div>
+
+```py
+import jax, pgx
+env = pgx.make("layer_go")
+state = env.init(jax.random.PRNGKey(0))
+state = env.step(state, 0)   # place at point 0 == (x=0, y=0, z=0)
+state = env.step(state, 75)  # pass
+```
+
+Observation shape `(3, 5, 5, 2)`, area scoring with `komi = 7.5`. Full rules, indexing, and known
+limitations (fixed board size, no superko) are documented in [`docs/layer_go.md`](docs/layer_go.md).
 
 <details><summary>Versioning policy</summary>
 
