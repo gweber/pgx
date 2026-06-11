@@ -182,6 +182,30 @@ game immediately with `-1` for the offending player.
 - **No variable-size engine.** Larger Layer Go variants such as 7×7×3 or 5×5×5 are not
   implemented yet.
 
+## Random selfplay sanity check
+
+`examples/layer_go_random_selfplay.py` runs many episodes of uniformly-random **legal**
+self-play (vmapped + jitted) and prints first-order health metrics: average/min/max game
+length, black/white win rates, average final score margin, terminal-reason distribution
+(two passes / max length / illegal), average legal actions per ply, percentage of games
+reaching the max length, and a rough env-steps/sec throughput.
+
+```sh
+python examples/layer_go_random_selfplay.py --episodes 64 --seed 0
+```
+
+It only samples from `legal_action_mask` and reads public state (plus the internal
+`_score` helper for the area-score margin), so it changes no game rules. Terminal reasons are
+*inferred* from public state — `consecutive_pass_count >= 2` for the two-pass ending and
+`step_count >= 512` for the max-length ending — because the environment does not expose a
+terminal-reason field. The legal-only sampler should never produce the "illegal action"
+bucket (it stays at 0).
+
+**This is a sanity check, not a balance study.** `komi = 7.5` is untuned, and a lopsided
+random-play win rate reflects the komi value and random dynamics on this small 3D board, not
+the strength balance of skilled play. Throughput is also CPU-bound in this slice; use a
+smaller `--episodes` for a quick check or an accelerator for larger runs.
+
 ## Visualization
 
 Layer Go supports the standard PGX SVG visualizer via `state.to_svg()` / `state.save_svg(...)`
