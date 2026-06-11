@@ -3,17 +3,21 @@ import jax.numpy as jnp
 
 import pgx
 from pgx.layer_go import (
+    _EMPTY_HISTORY,
     ACTION_SIZE,
     BOARD_SIZE,
     DEPTH,
     HEIGHT,
     KOMI,
+    MAX_GAME_LENGTH,
+    MAX_HISTORY,
     NEIGHBORS,
     PASS_ACTION,
     WIDTH,
     GameState,
     LayerGo,
     State,
+    _is_superko,
     _legal_action_mask,
     _score,
     coord_to_index,
@@ -26,12 +30,35 @@ step = jax.jit(env.step)
 observe = jax.jit(env.observe)
 
 
-def _empty_state(board, color=0, player_order=(0, 1)):
-    """Build a State with a hand-crafted board and the given color to move."""
-    x = GameState(step_count=jnp.int32(color), board=jnp.int32(board))
+def _history_from_boards(boards):
+    """Build a (MAX_HISTORY, BOARD_SIZE) superko history seeded with `boards` (in order)."""
+    hist = _EMPTY_HISTORY
+    for i, b in enumerate(boards):
+        hist = hist.at[i].set(jnp.int8(b))
+    return hist, jnp.int32(len(boards))
+
+
+def _empty_state(board, color=0, player_order=(0, 1), history_boards=None, step_count=None):
+    """Build a State with a hand-crafted board and the given color to move.
+
+    `history_boards` seeds the positional-superko history (defaults to just the empty board,
+    matching a fresh GameState). `step_count` overrides the ply counter (its parity also sets
+    the color unless `color` already encodes it).
+    """
+    if history_boards is None:
+        board_history, num_history = _EMPTY_HISTORY, jnp.int32(1)
+    else:
+        board_history, num_history = _history_from_boards(history_boards)
+    sc = color if step_count is None else step_count
+    x = GameState(
+        step_count=jnp.int32(sc),
+        board=jnp.int32(board),
+        board_history=board_history,
+        num_history=num_history,
+    )
     return State(  # type: ignore
-        current_player=jnp.int32(player_order[color]),
-        legal_action_mask=_legal_action_mask(jnp.int32(board), jnp.int32(color)),
+        current_player=jnp.int32(player_order[int(sc) % 2]),
+        legal_action_mask=_legal_action_mask(jnp.int32(board), jnp.int32(int(sc) % 2), board_history),
         _player_order=jnp.int32(player_order),
         _x=x,
     )
@@ -462,3 +489,186 @@ def test_illegal_action_terminates_with_penalty():
     state2 = step(state, jnp.int32(a))
     assert bool(state2.terminated)
     assert state2.rewards[loser] == -1.0
+
+
+# --------------------------------------------------------------------------- #
+# Positional superko / ko
+# --------------------------------------------------------------------------- #
+def _ko_position():
+    """A minimal ko in Layer Go.
+
+    White stone W=(2,1,0) is in atari with its single liberty at the ko point K=(1,1,0);
+    the surrounding stones make black's capture at K self-atari with its only liberty back
+    at W, so a white recapture at W would recreate the exact starting board (board B0).
+    The z-neighbours (..,1) are filled to remove the upward liberties that would otherwise
+    break the ko. Returns (B0, K, W).
+    """
+    b = [0] * BOARD_SIZE
+    W = coord_to_index(2, 1, 0)
+    K = coord_to_index(1, 1, 0)
+    for p in [W, coord_to_index(0, 1, 0), coord_to_index(1, 0, 0), coord_to_index(1, 2, 0), coord_to_index(1, 1, 1)]:
+        b[p] = -1  # white
+    for p in [coord_to_index(3, 1, 0), coord_to_index(2, 0, 0), coord_to_index(2, 2, 0), coord_to_index(2, 1, 1)]:
+        b[p] = 1  # black
+    return b, K, W
+
+
+def test_initial_empty_board_in_history():
+    # The empty board is recorded at init, so _is_superko flags it.
+    state = init(jax.random.PRNGKey(0))
+    empty = jnp.zeros(BOARD_SIZE, dtype=jnp.int32)
+    assert bool(_is_superko(state._x.board_history, empty))
+    # A board not in history is not flagged.
+    other = jnp.zeros(BOARD_SIZE, dtype=jnp.int32).at[0].set(1)
+    assert not bool(_is_superko(state._x.board_history, other))
+
+
+def test_immediate_ko_recapture_illegal():
+    B0, K, W = _ko_position()
+    # Seed history so B0 is a previously-seen board, then let black capture at K.
+    state = _empty_state(B0, color=0, history_boards=[B0])
+    assert bool(state.legal_action_mask[K])  # black capture is legal
+    state = step(state, jnp.int32(K))
+    assert state._x.board[W] == 0  # white stone captured
+    assert state._x.board[K] == 1  # black stone placed
+    assert not bool(state.terminated)
+    # White recapture at W would recreate B0 -> illegal by superko, in the mask...
+    assert not bool(state.legal_action_mask[W])
+    # ...and enforced by step (illegal action -> acting player loses).
+    loser = int(state.current_player)
+    after = step(state, jnp.int32(W))
+    assert bool(after.terminated)
+    assert after.rewards[loser] == -1.0
+
+
+def test_non_repeating_capture_is_legal():
+    # Same ko shape, but instead of the repeating recapture white plays elsewhere: legal.
+    B0, K, W = _ko_position()
+    state = _empty_state(B0, color=0, history_boards=[B0])
+    state = step(state, jnp.int32(K))
+    elsewhere = coord_to_index(4, 4, 2)
+    assert bool(state.legal_action_mask[elsewhere])
+    state2 = step(state, jnp.int32(elsewhere))
+    assert not bool(state2.terminated)
+    assert state2._x.board[elsewhere] == -1  # white played, game continues
+
+
+def test_superko_helper_detects_longer_cycle():
+    # Helper-level test for a repetition longer than simple ko: a candidate equal to an
+    # older (non-immediately-preceding) recorded board is a superko violation.
+    b1 = [0] * BOARD_SIZE
+    b1[coord_to_index(0, 0, 0)] = 1
+    b2 = [0] * BOARD_SIZE
+    b2[coord_to_index(0, 0, 0)] = 1
+    b2[coord_to_index(4, 4, 2)] = -1
+    b3 = [0] * BOARD_SIZE
+    b3[coord_to_index(2, 2, 1)] = 1
+    hist, _ = _history_from_boards([[0] * BOARD_SIZE, b1, b2, b3])
+    assert bool(_is_superko(hist, jnp.int32(b1)))  # recreating b1 (older board) is a violation
+    assert bool(_is_superko(hist, jnp.int32(b2)))
+    fresh = [0] * BOARD_SIZE
+    fresh[coord_to_index(1, 1, 1)] = -1
+    assert not bool(_is_superko(hist, jnp.int32(fresh)))  # never-seen board is fine
+
+
+def test_pass_not_blocked_by_superko_and_terminates():
+    # Even with a board that is in history, pass stays legal and two passes terminate.
+    B0, K, W = _ko_position()
+    state = _empty_state(B0, color=0, history_boards=[B0])
+    state = step(state, jnp.int32(K))  # black captures
+    assert bool(state.legal_action_mask[PASS_ACTION])  # white can still pass
+    state = step(state, jnp.int32(PASS_ACTION))
+    assert not bool(state.terminated)
+    assert bool(state.legal_action_mask[PASS_ACTION])
+    state = step(state, jnp.int32(PASS_ACTION))
+    assert bool(state.terminated)  # two consecutive passes
+
+
+# --------------------------------------------------------------------------- #
+# History bookkeeping
+# --------------------------------------------------------------------------- #
+def test_history_shape_and_init():
+    state = init(jax.random.PRNGKey(0))
+    assert state._x.board_history.shape == (MAX_HISTORY, BOARD_SIZE)
+    assert int(state._x.num_history) == 1  # only the empty board
+
+
+def test_stone_move_records_history_pass_does_not():
+    state = init(jax.random.PRNGKey(0))
+    state = step(state, jnp.int32(coord_to_index(1, 1, 0)))
+    assert int(state._x.num_history) == 2  # empty + one stone board
+    assert int(state._x.step_count) == 1
+    # the recorded board matches the current board
+    assert bool((state._x.board_history[1] == state._x.board.astype(jnp.int8)).all())
+    state = step(state, jnp.int32(PASS_ACTION))
+    assert int(state._x.num_history) == 2  # pass adds no row
+    assert int(state._x.step_count) == 2  # but the ply counter advances
+
+
+def test_unwritten_history_rows_are_sentinel():
+    # Unused rows must never collide with a real board (they hold the sentinel 2).
+    state = init(jax.random.PRNGKey(0))
+    assert int(state._x.board_history[5].min()) == 2
+    assert int(state._x.board_history[5].max()) == 2
+    real = jnp.zeros(BOARD_SIZE, dtype=jnp.int32).at[10].set(-1)
+    # a single real board placed in history is found; sentinel rows are not matched
+    hist, _ = _history_from_boards([[0] * BOARD_SIZE, real])
+    assert bool(_is_superko(hist, real))
+
+
+# --------------------------------------------------------------------------- #
+# Finite-episode termination (max game length)
+# --------------------------------------------------------------------------- #
+def test_max_game_length_terminates_and_area_scores():
+    # One ply before the cap, a single legal stone move hits MAX_GAME_LENGTH and terminates.
+    board = [0] * BOARD_SIZE  # empty board at the cap boundary
+    state = _empty_state(board, player_order=(0, 1), step_count=MAX_GAME_LENGTH - 1)
+    assert not bool(state.terminated)
+    mover = int(state.current_player)  # this player's lone stone will control the whole board
+    a = coord_to_index(2, 2, 1)
+    state = step(state, jnp.int32(a))
+    assert int(state._x.step_count) == MAX_GAME_LENGTH
+    assert bool(state.terminated)  # max-length termination
+    # area scored: the single placed stone controls the whole board -> that player wins, zero-sum
+    assert float(state.rewards[mover]) == 1.0
+    assert float(state.rewards[1 - mover]) == -1.0
+    assert float(state.rewards.sum()) == 0.0
+
+
+def test_one_ply_before_cap_does_not_terminate():
+    board = [0] * BOARD_SIZE
+    state = _empty_state(board, player_order=(0, 1), step_count=MAX_GAME_LENGTH - 2)
+    state = step(state, jnp.int32(coord_to_index(0, 0, 0)))
+    assert int(state._x.step_count) == MAX_GAME_LENGTH - 1
+    assert not bool(state.terminated)
+
+
+def test_illegal_before_cap_uses_illegal_loss_not_area():
+    # An illegal action just below the cap follows illegal-action behavior (acting player
+    # loses with -1), not area scoring of the board.
+    board = [0] * BOARD_SIZE
+    board[coord_to_index(2, 2, 1)] = 1  # occupy a point
+    state = _empty_state(board, player_order=(0, 1), step_count=MAX_GAME_LENGTH - 1)
+    loser = int(state.current_player)
+    state = step(state, jnp.int32(coord_to_index(2, 2, 1)))  # occupied -> illegal
+    assert bool(state.terminated)
+    assert float(state.rewards[loser]) == -1.0
+    assert float(state.rewards.sum()) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Pass / two-pass termination
+# --------------------------------------------------------------------------- #
+def test_pass_counter_resets_after_stone_move():
+    state = init(jax.random.PRNGKey(0))
+    state = step(state, jnp.int32(PASS_ACTION))
+    assert int(state._x.consecutive_pass_count) == 1
+    state = step(state, jnp.int32(coord_to_index(2, 2, 1)))  # stone move resets the counter
+    assert int(state._x.consecutive_pass_count) == 0
+    assert not bool(state.terminated)
+    state = step(state, jnp.int32(PASS_ACTION))
+    assert int(state._x.consecutive_pass_count) == 1
+    assert not bool(state.terminated)
+    state = step(state, jnp.int32(PASS_ACTION))
+    assert int(state._x.consecutive_pass_count) == 2
+    assert bool(state.terminated)
