@@ -50,6 +50,7 @@ EnvId = Literal[
     "go_19x19",
     "hex",
     "kuhn_poker",
+    "layer_go",
     "leduc_holdem",
     # "mahjong",
     "minatar-asterix",
@@ -377,6 +378,10 @@ def make(env_id: EnvId):  # noqa: C901
         from pgx.kuhn_poker import KuhnPoker
 
         return KuhnPoker()
+    elif env_id == "layer_go":
+        from pgx.layer_go import LayerGo
+
+        return LayerGo()
     elif env_id == "leduc_holdem":
         from pgx.leduc_holdem import LeducHoldem
 
