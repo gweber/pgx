@@ -20,6 +20,7 @@ nav:
     - Go: go.md
     - Hex: hex.md
     - Kuhn poker: kuhn_poker.md
+    - Layer Go: layer_go.md
     - Leduc hold’em: leduc_holdem.md
     - MinAtar Asterix: minatar_asterix.md
     - MinAtar Breakout: minatar_breakout.md
