@@ -17,8 +17,11 @@ from pgx.layer_go import (
     LayerGo,
     State,
     _board_hash,
+    _color_to_sign,
+    _group_alive,
     _is_superko,
     _legal_action_mask,
+    _resulting_board,
     _score,
     coord_to_index,
     index_to_coord,
@@ -672,3 +675,51 @@ def test_pass_counter_resets_after_stone_move():
     state = step(state, jnp.int32(PASS_ACTION))
     assert int(state._x.consecutive_pass_count) == 2
     assert bool(state.terminated)
+
+
+# --------------------------------------------------------------------------- #
+# Board-wide legal mask: differential test vs the straightforward definition
+# --------------------------------------------------------------------------- #
+def _legal_action_mask_reference(board, color, hash_history, num_history):
+    """Reference legal mask: the straightforward per-candidate definition (empty, not suicide
+    after captures, not positional-superko), used to pin the optimized board-wide mask."""
+    my_sign = _color_to_sign(color)
+
+    def is_legal(a):
+        is_empty = board[a] == 0
+        new_board, _ = _resulting_board(board, my_sign, a)
+        not_suicide = _group_alive(new_board, new_board == my_sign)[a]
+        not_superko = ~_is_superko(hash_history, num_history, _board_hash(new_board))
+        return is_empty & not_suicide & not_superko
+
+    return jnp.append(jax.vmap(is_legal)(jnp.arange(BOARD_SIZE)), True)
+
+
+def test_legal_action_mask_matches_reference():
+    # Lockstep random-legal playouts (batch 64): the optimized board-wide mask must equal the
+    # per-candidate reference at every ply, covering captures, suicide, atari and superko.
+    batch = 64
+    vinit = jax.jit(jax.vmap(env.init))
+    vstep = jax.jit(jax.vmap(env.step))
+    ref = jax.jit(jax.vmap(_legal_action_mask_reference, in_axes=(0, 0, 0, 0)))
+    fast = jax.jit(jax.vmap(_legal_action_mask, in_axes=(0, 0, 0, 0)))
+
+    state = vinit(jax.random.split(jax.random.PRNGKey(20240611), batch))
+    key = jax.random.PRNGKey(7)
+    checked = 0
+    for _ in range(160):
+        x = state._x
+        assert bool(
+            (
+                ref(x.board, x.color, x.hash_history, x.num_history)
+                == fast(x.board, x.color, x.hash_history, x.num_history)
+            ).all()
+        ), "board-wide legal mask diverged from reference"
+        checked += 1
+        if bool(state.terminated.all()):
+            break
+        key, sub = jax.random.split(key)
+        logits = jnp.where(state.legal_action_mask, 0.0, -jnp.inf)
+        actions = jax.vmap(lambda lg, k: jax.random.categorical(k, lg))(logits, jax.random.split(sub, batch))
+        state = vstep(state, actions)
+    assert checked > 50  # sanity: the playout actually ran

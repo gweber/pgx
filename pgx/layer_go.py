@@ -229,23 +229,88 @@ def _is_superko(hash_history: Array, num_history: Array, candidate_hash: Array) 
     return (same & valid).any()
 
 
-def _is_legal_point(board: Array, my_sign: Array, action: Array, hash_history: Array, num_history: Array) -> Array:
-    """A point action is legal iff the point is empty, the placement is not suicide (after
-    captures), and the resulting board has not appeared before in the game (positional superko).
+def _chain_labels(board: Array) -> Array:
+    """Label every stone with the smallest point index in its same-colour orthogonal chain.
+
+    Empty points get the sentinel label ``BOARD_SIZE``. This is one board-wide min-propagation
+    flood (``while_loop`` to a fixpoint), shared by all 75 candidate points, replacing the old
+    per-candidate flooding.
     """
-    is_empty = board[action] == 0
-    new_board, _ = _resulting_board(board, my_sign, action)
-    my_alive = _group_alive(new_board, new_board == my_sign)
-    not_suicide = my_alive[action]
-    not_superko = ~_is_superko(hash_history, num_history, _board_hash(new_board))
-    return is_empty & not_suicide & not_superko
+    is_stone = board != 0
+    label = jnp.where(is_stone, jnp.arange(BOARD_SIZE), BOARD_SIZE)
+
+    def cond(carry):
+        _, changed = carry
+        return changed
+
+    def body(carry):
+        label, _ = carry
+        same_chain = _ON_BOARD & (board[_SAFE_NEIGHBORS] == board[:, None]) & (board[:, None] != 0)
+        neighbor_label = jnp.where(same_chain, label[_SAFE_NEIGHBORS], BOARD_SIZE)
+        new_label = jnp.where(is_stone, jnp.minimum(label, neighbor_label.min(axis=1)), BOARD_SIZE)
+        return new_label, (new_label != label).any()
+
+    label, _ = jax.lax.while_loop(cond, body, (label, jnp.bool_(True)))
+    return label
 
 
 def _legal_action_mask(board: Array, color: Array, hash_history: Array, num_history: Array) -> Array:
+    """Legal action mask, computed board-wide (no per-candidate flood fill).
+
+    Liberties are derived once for the whole board with the pseudo-liberty trick (as in pgx
+    Go): a chain is in atari (exactly one liberty) iff ``idx_sum**2 == num_pseudo * idx_sq_sum``
+    over its empty-neighbour indices. A point move is then legal iff the point is empty and a
+    neighbour is empty, or a friendly chain with >= 2 liberties, or an enemy chain in atari
+    (a capture). Superko is checked by reconstructing each candidate's post-capture board hash
+    incrementally from the current hash (place delta + captured-stone deltas), so no candidate
+    board is materialised. Equivalence to the straightforward per-candidate definition is
+    pinned by a differential test (``test_legal_action_mask_matches_reference``).
+    """
     my_sign = _color_to_sign(color)
-    point_mask = jax.vmap(lambda a: _is_legal_point(board, my_sign, a, hash_history, num_history))(
-        jnp.arange(BOARD_SIZE)
-    )
+    empty = board == 0
+    is_stone = ~empty
+    label = _chain_labels(board)
+    safe_label = jnp.where(is_stone, label, 0)
+    seg = jnp.where(is_stone, label, BOARD_SIZE)  # stones -> their chain; empties -> dump bucket
+
+    # Per-chain pseudo-liberty stats via segment_sum over chain labels (1-based empty indices).
+    idx1 = jnp.arange(1, BOARD_SIZE + 1)
+    nbr_empty = empty[_SAFE_NEIGHBORS] & _ON_BOARD
+    e_idx1 = jnp.where(nbr_empty, idx1[_SAFE_NEIGHBORS], 0)
+
+    def agg(v):
+        return jax.ops.segment_sum(v, seg, num_segments=BOARD_SIZE + 1)[:BOARD_SIZE]
+
+    num_pseudo = agg(nbr_empty.sum(1))
+    idx_sum = agg(e_idx1.sum(1))
+    idx_sq_sum = agg((e_idx1**2).sum(1))  # int32-safe: <= 75*6*75 sums stay < 2**31
+
+    in_atari_chain = (idx_sum**2 == num_pseudo * idx_sq_sum) & (num_pseudo > 0)
+    in_atari = is_stone & in_atari_chain[safe_label]
+    has_liberty = (board == my_sign) & ~in_atari  # friendly chain with >= 2 liberties
+    can_kill = (board == -my_sign) & in_atari  # enemy chain in atari -> this point captures it
+
+    adj = _ON_BOARD & (empty[_SAFE_NEIGHBORS] | has_liberty[_SAFE_NEIGHBORS] | can_kill[_SAFE_NEIGHBORS])
+    base_legal = empty & adj.any(axis=1)  # empty and not suicide (after captures)
+
+    # Superko: post-capture board hash per candidate = base hash + place delta + capture delta.
+    pts = jnp.arange(BOARD_SIZE)
+    base_hash = _board_hash(board)
+    place_delta = _ZOBRIST[my_sign, pts] - _ZOBRIST[0, pts]  # (75, 2): empty point -> my stone
+    # Each enemy chain in atari is captured by its single liberty point; aggregate the chain's
+    # removal delta (stones -> empty) at that liberty index, summing chains that share a point.
+    removal = _ZOBRIST[0, pts] - _ZOBRIST[jnp.clip(board, -1, 1), pts]  # (75, 2) per stone
+    chain_removal = jax.ops.segment_sum(removal, seg, num_segments=BOARD_SIZE + 1)[:BOARD_SIZE]
+    single_liberty = (idx_sq_sum // jnp.maximum(idx_sum, 1)) - 1  # 0-based, valid for atari chains
+    enemy_atari_chain = in_atari_chain & (board == -my_sign)
+    capture_target = jnp.where(enemy_atari_chain, single_liberty, BOARD_SIZE)
+    capture_delta = jax.ops.segment_sum(chain_removal, capture_target, num_segments=BOARD_SIZE + 1)[:BOARD_SIZE]
+
+    post_hash = base_hash[None, :] + place_delta + capture_delta  # (75, 2)
+    valid = jnp.arange(MAX_HISTORY) < num_history
+    is_superko = ((post_hash[:, None, :] == hash_history[None, :, :]).all(-1) & valid[None, :]).any(-1)
+
+    point_mask = base_legal & ~is_superko
     return jnp.append(point_mask, TRUE)  # pass is always legal (no superko check on pass)
 
 
