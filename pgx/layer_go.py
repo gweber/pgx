@@ -39,6 +39,15 @@ PASS_ACTION = BOARD_SIZE  # 75
 ACTION_SIZE = BOARD_SIZE + 1  # 76
 KOMI = 7.5
 
+# Robust finite-episode bound: a game is force-terminated (and area-scored) once it
+# reaches MAX_GAME_LENGTH plies. The superko history holds one absolute board per stone
+# move plus the initial empty board, so MAX_HISTORY = MAX_GAME_LENGTH + 1 rows suffice.
+MAX_GAME_LENGTH = 512
+MAX_HISTORY = MAX_GAME_LENGTH + 1  # 513
+# Sentinel for unused history rows: no real board (values in {-1, 0, 1}) equals it, so
+# superko comparisons against not-yet-written rows are always false.
+_HISTORY_FILL = jnp.int8(2)
+
 
 def coord_to_index(x: int, y: int, z: int) -> int:
     """Map a ``(x, y, z)`` coordinate to its linear board index."""
@@ -76,11 +85,19 @@ NEIGHBORS = jnp.array(_build_neighbor_table(), dtype=jnp.int32)  # (75, 6), -1 i
 _ON_BOARD = NEIGHBORS >= 0  # (75, 6) bool
 _SAFE_NEIGHBORS = jnp.where(_ON_BOARD, NEIGHBORS, 0)  # off-board entries point to 0 (masked out)
 
+# Initial superko history: the empty board recorded at row 0, every other row is sentinel.
+_EMPTY_HISTORY = jnp.full((MAX_HISTORY, BOARD_SIZE), _HISTORY_FILL, dtype=jnp.int8).at[0].set(0)
+
 
 class GameState(NamedTuple):
     step_count: Array = jnp.int32(0)  # ply count; color = step_count % 2 (0 = black, 1 = white)
     board: Array = jnp.zeros(BOARD_SIZE, dtype=jnp.int32)  # 0 = empty, +1 = black, -1 = white
     consecutive_pass_count: Array = jnp.int32(0)
+    # Positional-superko history: absolute boards (int8, values in {-1, 0, 1}) for the initial
+    # empty board and every board reached by a stone move. Passes do not change the board, so
+    # they add no row. `num_history` is the count of valid rows / the next write index.
+    board_history: Array = _EMPTY_HISTORY
+    num_history: Array = jnp.int32(1)
 
     @property
     def color(self) -> Array:
@@ -172,18 +189,33 @@ def _resulting_board(board: Array, my_sign: Array, action: Array):
     return new_board, jnp.count_nonzero(captured)
 
 
-def _is_legal_point(board: Array, my_sign: Array, action: Array) -> Array:
-    """A point action is legal iff the point is empty and the placement is not suicide."""
+def _is_superko(board_history: Array, candidate: Array) -> Array:
+    """True if ``candidate`` equals any board already recorded in ``board_history``.
+
+    This is **positional** superko: only the stone arrangement is compared, never the
+    player to move. Unused history rows hold the sentinel ``2`` (no real board, whose
+    values are in {-1, 0, 1}, can equal it), so not-yet-written rows are ignored without
+    needing a separate validity mask.
+    """
+    return jnp.all(board_history == candidate.astype(board_history.dtype), axis=1).any()
+
+
+def _is_legal_point(board: Array, my_sign: Array, action: Array, board_history: Array) -> Array:
+    """A point action is legal iff the point is empty, the placement is not suicide (after
+    captures), and the resulting board has not appeared before in the game (positional superko).
+    """
     is_empty = board[action] == 0
     new_board, _ = _resulting_board(board, my_sign, action)
     my_alive = _group_alive(new_board, new_board == my_sign)
-    return is_empty & my_alive[action]
+    not_suicide = my_alive[action]
+    not_superko = ~_is_superko(board_history, new_board)
+    return is_empty & not_suicide & not_superko
 
 
-def _legal_action_mask(board: Array, color: Array) -> Array:
+def _legal_action_mask(board: Array, color: Array, board_history: Array) -> Array:
     my_sign = _color_to_sign(color)
-    point_mask = jax.vmap(lambda a: _is_legal_point(board, my_sign, a))(jnp.arange(BOARD_SIZE))
-    return jnp.append(point_mask, TRUE)  # pass is always legal
+    point_mask = jax.vmap(lambda a: _is_legal_point(board, my_sign, a, board_history))(jnp.arange(BOARD_SIZE))
+    return jnp.append(point_mask, TRUE)  # pass is always legal (no superko check on pass)
 
 
 def _territory(board: Array):
@@ -228,10 +260,10 @@ def _rewards(board: Array, player_order: Array, terminated: Array) -> Array:
 
 def _init(key: PRNGKey) -> State:
     player_order = jnp.array([[0, 1], [1, 0]])[jax.random.bernoulli(key).astype(jnp.int32)]
-    x = GameState()
+    x = GameState()  # default GameState already records the empty board in history (row 0)
     return State(  # type: ignore
         current_player=player_order[0],
-        legal_action_mask=_legal_action_mask(x.board, jnp.int32(0)),
+        legal_action_mask=_legal_action_mask(x.board, jnp.int32(0), x.board_history),
         _player_order=player_order,
         _x=x,
     )
@@ -246,17 +278,27 @@ def _step(state: State, action: Array) -> State:
     new_board = jnp.where(is_pass, x.board, placed_board)
     consecutive_pass_count = jnp.where(is_pass, x.consecutive_pass_count + 1, 0).astype(jnp.int32)
 
+    # Record the new board for stone moves only. A pass leaves the board unchanged, so it
+    # neither advances nor duplicates the superko history (and never becomes illegal).
+    recorded_history = x.board_history.at[x.num_history].set(new_board.astype(jnp.int8))
+    board_history = jnp.where(is_pass, x.board_history, recorded_history)
+    num_history = jnp.where(is_pass, x.num_history, x.num_history + 1).astype(jnp.int32)
+
     next_x = GameState(
         step_count=x.step_count + 1,
         board=new_board,
         consecutive_pass_count=consecutive_pass_count,
+        board_history=board_history,
+        num_history=num_history,
     )
-    terminated = consecutive_pass_count >= 2
+    two_consecutive_passes = consecutive_pass_count >= 2
+    max_length_reached = next_x.step_count >= MAX_GAME_LENGTH
+    terminated = two_consecutive_passes | max_length_reached
     rewards = _rewards(new_board, state._player_order, terminated)
 
     return state.replace(  # type: ignore
         current_player=state._player_order[next_x.color],
-        legal_action_mask=_legal_action_mask(new_board, next_x.color),
+        legal_action_mask=_legal_action_mask(new_board, next_x.color, board_history),
         rewards=rewards,
         terminated=terminated,
         _x=next_x,

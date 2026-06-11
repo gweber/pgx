@@ -88,13 +88,30 @@ A move is **suicide** (and therefore illegal) if, *after* resolving opponent cap
 placed stone's own group has zero liberties. A move that removes its own last liberty but
 captures an adjacent opponent group — thereby opening a liberty — is legal.
 
-## Pass and end of game
+## Ko and repetition
 
-- Action `75` is **pass** and is always legal in a non-terminal state.
-- **Two consecutive passes** end the game.
+Layer Go uses **positional superko**: a stone placement is illegal if, after captures,
+the resulting board position is equal to any previous board position in the same game.
+This prevents immediate ko recapture and longer repetition cycles.
 
-There is no separate "board full" rule: when no point move is legal both players simply pass,
-and the two-pass rule terminates the game cleanly.
+Only the stone arrangement on the 75-point board is compared — never the player to move
+(this is *positional*, not *situational*, superko). Passes do not change the board position
+and are always legal in non-terminal states. The initial empty board is part of the superko
+history, and every board reached by a legal stone move is added to it; passes add no entry.
+
+## Termination
+
+A game ends when one of the following happens:
+
+1. **two consecutive passes**,
+2. the fixed **maximum game length** (`512` plies) is reached,
+3. an **illegal action** is taken.
+
+Normal games are scored by area scoring. If the maximum game length is reached, the current
+board is also scored by area scoring (zero-sum, winner `+1` / loser `-1`). Illegal actions
+follow standard PGX behavior: the acting player loses immediately (and the board is *not*
+area-scored). There is no separate "board full" rule — when no point move is legal both
+players simply pass, and the two-pass rule terminates the game cleanly.
 
 ## Scoring (area scoring + komi)
 
@@ -124,6 +141,8 @@ Black wins if `black_score > white_score`, otherwise white wins. Because komi is
 | Observation shape | `(3, 5, 5, 2)` = `(depth, height, width, channels)` |
 | Observation type | `bool` |
 | Rewards | `{-1, 1}` at terminal, `0` otherwise |
+| Komi | `7.5` |
+| Maximum game length | `512` plies |
 
 ## Observation
 
@@ -140,8 +159,12 @@ index formula above.
 ## Action
 
 Actions `0 … 74` place a stone on the corresponding point index. Action `75` is pass.
-A point action is legal iff the point is empty and the placement is not suicide (after
-captures). Pass is legal whenever the game is not terminal.
+A point action is legal iff (1) the game is not terminal, (2) the point is empty, (3) the
+placement is not suicide after captures, and (4) the resulting board has not appeared before
+in the game (positional superko). Pass is legal whenever the game is not terminal and is never
+subject to the superko check. The legal action mask and `step` agree: a superko-violating
+point move is `False` in the mask, and selecting it anyway triggers standard illegal-action
+termination.
 
 ## Rewards
 
@@ -151,12 +174,13 @@ game immediately with `-1` for the offending player.
 
 ## Known limitations
 
-- **Fixed board size.** Only the 5×5×3 board is implemented; there is no variable-size engine.
-- **No superko / no ko rule.** This first version does not implement positional superko, and
-  it does not implement simple (single-stone) ko either. Repetition is not detected; a finite
-  game length is guaranteed in practice by the two-pass termination rule.
-- **Komi is untuned.** `komi = 7.5` is borrowed from 2D Go and is not balanced for this 3D
-  board; it serves only to break ties.
+- **Fixed board size.** Only the 5×5×3 board is implemented.
+- **Fixed history size.** Superko history is bounded by the maximum game length (`512` plies),
+  stored as a fixed `(513, 75)` int8 buffer in the state (~38 KB/state).
+- **Komi is untuned.** `komi = 7.5` is a starting value and has not been balanced for this 3D
+  board; it serves to break ties.
+- **No variable-size engine.** Larger Layer Go variants such as 7×7×3 or 5×5×5 are not
+  implemented yet.
 
 ## Visualization
 

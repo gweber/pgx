@@ -177,8 +177,9 @@ state = env.step(state, 0)   # place at point 0 == (x=0, y=0, z=0)
 state = env.step(state, 75)  # pass
 ```
 
-Observation shape `(3, 5, 5, 2)`, area scoring with `komi = 7.5`. Full rules, indexing, and known
-limitations (fixed board size, no superko) are documented in [`docs/layer_go.md`](docs/layer_go.md).
+Observation shape `(3, 5, 5, 2)`, area scoring with `komi = 7.5`, **positional superko**, and a
+512-ply max-game-length cap for finite episodes. Full rules, indexing, and known limitations are
+documented in [`docs/layer_go.md`](docs/layer_go.md).
 
 <details><summary>Versioning policy</summary>
 
