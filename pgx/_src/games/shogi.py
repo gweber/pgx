@@ -324,6 +324,17 @@ OPP_DRAGON = jnp.int32(27)  # 龍
 
 ALL_SQ = jnp.arange(81)
 
+# Precomputed at module load — replaces the 8-scatter rebuild on every _major_piece_ix call.
+# Index = piece id (0-27); value = major-piece slot index (-1 if not a major piece).
+_MAJOR_PIECE_IX_TABLE: Array = (
+    (-jnp.ones(28, dtype=jnp.int32))
+    .at[1].set(0)   # LANCE
+    .at[4].set(1)   # BISHOP
+    .at[5].set(2)   # ROOK
+    .at[12].set(1)  # HORSE
+    .at[13].set(2)  # DRAGON
+)
+
 INIT_LEGAL_ACTION_MASK = np.zeros(81 * 27, dtype=jnp.bool_)
 # fmt: off
 ixs = np.int32([5, 7, 14, 23, 25, 32, 34, 41, 43, 50, 52, 59, 61, 68, 77, 79, 115, 124, 133, 142, 187, 196, 205, 214, 268, 277, 286, 295, 304, 331])
@@ -526,8 +537,13 @@ def _legal_action_mask(state: GameState):
         )
     )  # (27 * 81)
 
-    # check drop pawn mate
-    is_drop_pawn_mate, to = _is_drop_pawn_mate(state)
+    # check drop pawn mate — only relevant when the current player actually has a pawn in hand
+    has_pawn_in_hand = state.hand[0, PAWN] > 0
+    is_drop_pawn_mate, to = jax.lax.cond(
+        has_pawn_in_hand,
+        lambda: _is_drop_pawn_mate(state),
+        lambda: (jnp.bool_(False), jnp.int32(0)),
+    )
     direction = 20
     can_drop_pawn = legal_action_mask[direction * 81 + to]  # current
     can_drop_pawn &= ~is_drop_pawn_mate
@@ -709,20 +725,7 @@ def _is_major_piece(piece):
 
 
 def _major_piece_ix(piece):
-    ixs = (
-        (-jnp.ones(28, dtype=jnp.int32))
-        .at[LANCE]
-        .set(0)
-        .at[BISHOP]
-        .set(1)
-        .at[ROOK]
-        .set(2)
-        .at[HORSE]
-        .set(1)
-        .at[DRAGON]
-        .set(2)
-    )
-    return jax.lax.select(piece >= 0, ixs[piece], jnp.int32(-1))
+    return jax.lax.select(piece >= 0, _MAJOR_PIECE_IX_TABLE[piece], jnp.int32(-1))
 
 
 def _observe(state: GameState, flip: bool = False) -> Array:

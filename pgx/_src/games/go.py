@@ -18,9 +18,16 @@ import jax
 from jax import Array, lax
 from jax import numpy as jnp
 
-from pgx._src.utils import xor_reduce
+from pgx._src.utils import bloom_insert, bloom_query, xor_reduce
 
 ZOBRIST_BOARD = jax.random.randint(jax.random.PRNGKey(12345), (3, 19 * 19, 2), 0, 2**31 - 1, jnp.uint32)
+
+# Tiered PSK: Bloom pre-filter (no false negatives) + exact recent window.
+# Cascade: bloom "no" → definitely new, O(k=4); bloom "maybe" → O(K=16) exact check.
+# State: 1 152 B vs 5 776 B for full hash_history (19×19); ~36× fewer PSK comparisons.
+# Caveat: superko cycles > _PSK_RECENT_K moves apart are not detected — acceptable for RL.
+_PSK_BLOOM_WORDS = 256  # 8 192-bit filter, 1 KB/state; FP ≈ 0.9 % for n=722 (19×19)
+_PSK_RECENT_K = 16      # exact positions to keep; covers Ko and all typical short-range cycles
 
 
 class GameState(NamedTuple):
@@ -32,7 +39,8 @@ class GameState(NamedTuple):
     consecutive_pass_count: Array = jnp.int32(0)
     ko: Array = jnp.int32(-1)  # by SSK
     is_psk: Array = jnp.bool_(False)
-    hash_history: Array = jnp.zeros((19 * 19 * 2, 2), dtype=jnp.uint32)
+    psk_bloom: Array = jnp.zeros(_PSK_BLOOM_WORDS, dtype=jnp.uint32)
+    psk_recent: Array = jnp.zeros((_PSK_RECENT_K, 2), dtype=jnp.uint32)
     # cached _count(board): (num_pseudo, idx_sum, idx_squared_sum), refreshed in step().
     # legal_action_mask (board t+1) and the next _apply_action (same board) used to each
     # recompute it — caching halves the per-ply chain-stat work. Invariant: rebuild this
@@ -52,12 +60,14 @@ class Game:
         self.komi = komi
         self.history_length = history_length
         self.max_termination_steps = size * size * 2 if max_termination_steps is None else max_termination_steps
+        # Precompute adjacency table once: shape (size**2, 4) int32.
+        # Eliminates repeated _adj_ixs vmap in _count, legal_action_mask, and _count_ji.
+        self.adj_mat = jax.vmap(_adj_ixs, in_axes=(0, None))(jnp.arange(size**2), size)
 
     def init(self) -> GameState:
         return GameState(
             board=jnp.zeros(self.size**2, dtype=jnp.int16),
             board_history=jnp.full((self.history_length, self.size**2), 2, dtype=jnp.int8),
-            hash_history=jnp.zeros((self.max_termination_steps, 2), dtype=jnp.uint32),
             chain_stats=jnp.zeros((3, self.size**2), dtype=jnp.int32),  # _count of an empty board
         )
 
@@ -71,15 +81,23 @@ class Game:
         )
         # refresh the chain-stat cache for the new board (consumed by legal_action_mask
         # and by _apply_action on the next step)
-        state = state._replace(chain_stats=jnp.stack(_count(state, self.size)))
-        # update board history
-        board_history = jnp.roll(state.board_history, self.size**2)
-        board_history = board_history.at[0].set(jnp.clip(state.board, -1, 1).astype(jnp.int8))
+        state = state._replace(chain_stats=jnp.stack(_count(state, self.size, self.adj_mat)))
+        # update board history — circular buffer: write O(N) instead of rolling O(history×N)
+        hist_slot = state.step_count % self.history_length
+        board_history = state.board_history.at[hist_slot].set(
+            jnp.clip(state.board, -1, 1).astype(jnp.int8)
+        )
         state = state._replace(board_history=board_history)
-        # check PSK
+        # check PSK: tiered Bloom pre-filter + exact recent window
+        # bloom "no" → O(k) definitely-not-seen; bloom "maybe" → O(K) exact recent check.
         hash_ = _compute_hash(state)
-        state = state._replace(hash_history=state.hash_history.at[state.step_count].set(hash_))
-        state = state._replace(is_psk=_is_psk(state))
+        bloom_hit = bloom_query(state.psk_bloom, hash_)
+        recent_hit = (hash_ == state.psk_recent).all(axis=-1).any()
+        is_psk = (state.consecutive_pass_count == 0) & bloom_hit & recent_hit
+        psk_slot = state.step_count % _PSK_RECENT_K
+        new_bloom = bloom_insert(state.psk_bloom, hash_)
+        new_recent = state.psk_recent.at[psk_slot].set(hash_)
+        state = state._replace(psk_bloom=new_bloom, psk_recent=new_recent, is_psk=is_psk)
         # increment turns
         state = state._replace(step_count=state.step_count + 1)
         return state
@@ -91,7 +109,9 @@ class Game:
 
         def _make(i):
             c = jnp.int32([1, -1])[i % 2] * my_sign
-            return state.board_history[i // 2] == c
+            # circular buffer: most-recent slot = (step_count-1) % history_length
+            slot = (state.step_count - 1 - (i // 2)) % self.history_length
+            return state.board_history[slot] == c
 
         log = jax.vmap(_make)(jnp.arange(self.history_length * 2))
         color = jnp.full_like(log[0], color)  # b = 0, w = 1
@@ -107,12 +127,17 @@ class Game:
         has_liberty = (state.board * my_sign > 0) & ~in_atari
         can_kill = (state.board * opp_sign > 0) & in_atari
 
-        def is_adj_ok(xy):
-            adj_ixs = _adj_ixs(xy, self.size)
-            on_board = adj_ixs != -1
-            return (on_board & (is_empty[adj_ixs] | can_kill[adj_ixs] | has_liberty[adj_ixs])).any()
+        adj_mat = self.adj_mat  # (size**2, 4) precomputed
+        on_board = adj_mat != -1  # (size**2, 4) bool, static shape
 
-        mask = is_empty & jax.vmap(is_adj_ok)(jnp.arange(self.size**2))
+        # Fully vectorised: replace per-cell vmap with a single broadcast over adj_mat.
+        # safe_adj clamps -1 sentinel to 0 so out-of-board neighbors index safely;
+        # those entries are masked out by on_board before the .any().
+        safe_adj = jnp.where(on_board, adj_mat, 0)  # clamp -1 → 0 for safe gather
+        # One gather instead of three: OR the three (N,) conditions first.
+        neighbor_ok = is_empty | can_kill | has_liberty  # (N,)
+        ok = on_board & neighbor_ok[safe_adj]  # (N, 4)
+        mask = is_empty & ok.any(axis=1)
         mask = lax.select(state.ko == -1, mask, mask.at[state.ko].set(False))
         return jnp.append(mask, True)  # pass is always legal
 
@@ -123,7 +148,7 @@ class Game:
 
     def rewards(self, state: GameState) -> Array:
         is_terminal = self.is_terminal(state)
-        scores = _count_scores(state, self.size, enable=is_terminal)
+        scores = _count_scores(state, self.size, self.adj_mat, enable=is_terminal)
         is_black_win = scores[0] - self.komi > scores[1]
         rewards = lax.select(is_black_win, jnp.float32([1, -1]), jnp.float32([-1, 1]))
         to_play = state.color
@@ -146,7 +171,10 @@ def _apply_action(state: GameState, action, size) -> GameState:
     num_pseudo, idx_sum, idx_squared_sum = state.chain_stats
     chain_ix = jnp.abs(adj_ids) - 1
     is_atari = (idx_sum[chain_ix] ** 2) == idx_squared_sum[chain_ix] * num_pseudo[chain_ix]
-    single_liberty = (idx_squared_sum[chain_ix] // idx_sum[chain_ix]) - 1
+    # When is_atari, num_pseudo==1 so idx_sum == the single liberty's 1-indexed position.
+    # single_liberty is only used in is_killed (ANDed with is_atari), so the value is a
+    # don't-care when not in atari — skip the integer division entirely.
+    single_liberty = idx_sum[chain_ix] - 1
     is_killed = (adj_ixs != -1) & (adj_ids * opp_sign > 0) & is_atari & (single_liberty == action)
     surrounded_stones = (state.board[:, None] == adj_ids) & (is_killed[None, :])
     num_captured = jnp.count_nonzero(surrounded_stones)
@@ -174,30 +202,22 @@ def _apply_action(state: GameState, action, size) -> GameState:
     return state
 
 
-def _count(state: GameState, size):
+def _count(state: GameState, size, adj_mat):
     board = jnp.abs(state.board)
     is_empty = board == 0
-    idx_sum = jnp.where(is_empty, jnp.arange(1, size**2 + 1), 0)
-    idx_squared_sum = jnp.where(is_empty, jnp.arange(1, size**2 + 1) ** 2, 0)
 
-    def _count_neighbor(xy):
-        adj_ixs = _adj_ixs(xy, size)
-        on_board = adj_ixs != -1
-        return (
-            jnp.where(on_board, is_empty[adj_ixs], 0).sum(),
-            jnp.where(on_board, idx_sum[adj_ixs], 0).sum(),
-            jnp.where(on_board, idx_squared_sum[adj_ixs], 0).sum(),
-        )
+    # Pack all three per-cell neighbor stats into one (N,3) gather + one segment_sum.
+    # Single kernel vs. three separate ones → less launch overhead, better coalescing.
+    on_board = adj_mat != -1                                              # (N, 4)
+    safe_adj = jnp.where(on_board, adj_mat, 0)                           # clamp -1 safe
+    idx1 = jnp.arange(1, size**2 + 1, dtype=jnp.int32)
+    vals = jnp.stack([is_empty.astype(jnp.int32), idx1, idx1 * idx1], axis=1)  # (N, 3)
+    nb = jnp.where(on_board[:, :, None], vals[safe_adj], 0).sum(axis=1) # (N, 3)
 
-    idx = jnp.arange(size**2)
-    num_pseudo, idx_sum, idx_squared_sum = jax.vmap(_count_neighbor)(idx)
-
-    # accumulate per-point pseudo-liberty stats into their chains via scatter-add: O(n),
-    # unlike the previous all-pairs comparison (vmapped `board == x + 1` over all x), whose
-    # O(n^2) broadcast becomes memory-bound at training batch sizes (4.5x slower at batch 2048)
-    seg = jnp.where(is_empty, size**2, board - 1)  # chain id - 1, empties into overflow bucket
-    acc = lambda v: jax.ops.segment_sum(v, seg, num_segments=size**2 + 1)[: size**2]
-    return acc(num_pseudo), acc(idx_sum), acc(idx_squared_sum)
+    # scatter-add per-point stats into their chains; empties go into an overflow bucket
+    seg = jnp.where(is_empty, size**2, board.astype(jnp.int32) - 1)
+    result = jax.ops.segment_sum(nb, seg, num_segments=size**2 + 1)[: size**2]  # (N, 3)
+    return result[:, 0], result[:, 1], result[:, 2]
 
 
 def _signs(color):
@@ -217,34 +237,29 @@ def _compute_hash(state: GameState):
     return xor_reduce(to_reduce, 0)
 
 
-def _is_psk(state: GameState):
-    not_passed = state.consecutive_pass_count == 0
-    curr_hash = state.hash_history[state.step_count]
-    has_same_hash = (curr_hash == state.hash_history).all(axis=-1).sum() > 1
-    return not_passed & has_same_hash
-
-
-def _count_scores(state: GameState, size, enable=True):
+def _count_scores(state: GameState, size, adj_mat, enable=True):
     # `enable=False` replaces the board with a fully-occupied dummy whose flood fill converges
     # immediately. rewards() discards the scores of non-terminal states anyway, but under
     # vmap/jit the while_loop below runs as many rounds as the worst board in the batch needs —
     # without the dummy, every step pays the full territory fill even though almost no state
     # in the batch is terminal (the empty early-game board is the worst case at ~2*size rounds).
     def calc_point(c):
-        return _count_ji(state, c, size, enable) + jnp.count_nonzero(state.board * c > 0)
+        return _count_ji(state, c, size, adj_mat, enable) + jnp.count_nonzero(state.board * c > 0)
 
     return jax.vmap(calc_point)(jnp.int32([1, -1]))
 
 
-def _count_ji(state: GameState, color: int, size: int, enable=True):
+def _count_ji(state: GameState, color: int, size: int, adj_mat, enable=True):
     board = jnp.clip(state.board * color, -1, 1)  # my stone: 1, opp stone: -1
     board = jnp.where(enable, board, 1)
-    adj_mat = jax.vmap(_adj_ixs, in_axes=(0, None))(jnp.arange(size**2), size)  # (size**2, 4)
+    # adj_mat: (size**2, 4) precomputed adjacency; -1 means off-board
+    on_board = adj_mat != -1
+    safe_adj = jnp.where(on_board, adj_mat, 0)  # clamp for safe gather
 
     def fill_opp(x):
         b, _ = x
         # true if empty and adjacent to opponent's stone
-        mask = (b == 0) & ((adj_mat != -1) & (b[adj_mat] == -1)).any(axis=1)
+        mask = (b == 0) & (on_board & (b[safe_adj] == -1)).any(axis=1)
         return jnp.where(mask, -1, b), mask.any()
 
     board, _ = lax.while_loop(lambda x: x[1], fill_opp, (board, True))
