@@ -230,7 +230,10 @@ class Game:
         ones = jnp.ones((1, 8, 8), dtype=jnp.float16)
 
         def make(i):
-            board = jnp.rot90(state.board_history[i].reshape((8, 8)), k=1)
+            # circular buffer: most-recent slot = (step_count-1) % 8/HASH_HISTORY_LEN
+            bslot = (state.step_count - 1 - i) % 8
+            hslot = (state.step_count - 1 - i) % HASH_HISTORY_LEN
+            board = jnp.rot90(state.board_history[bslot].reshape((8, 8)), k=1)
 
             def piece_feat(p):
                 return (board == p).astype(jnp.float16)
@@ -238,7 +241,7 @@ class Game:
             my_pieces = jax.vmap(piece_feat)(jnp.arange(1, 7))
             opp_pieces = jax.vmap(piece_feat)(-jnp.arange(1, 7))
 
-            h = state.hash_history[i, :]
+            h = state.hash_history[hslot, :]
             rep = (state.hash_history == h).all(axis=1).sum() - 1
             rep = lax.select((h == 0).all(), 0, rep)
             rep0 = ones * (rep == 0)
@@ -262,8 +265,9 @@ class Game:
         terminated = ~state.legal_action_mask.any()
         terminated |= state.halfmove_count >= 100
         terminated |= has_insufficient_pieces(state)
-        # hash_history[0] always holds the current position's hash (set by _update_history)
-        rep = (state.hash_history == state.hash_history[0]).all(axis=1).sum() - 1
+        # circular buffer: current hash is at slot (step_count-1) % HASH_HISTORY_LEN
+        current_hash = state.hash_history[(state.step_count - 1) % HASH_HISTORY_LEN]
+        rep = (state.hash_history == current_hash).all(axis=1).sum() - 1
         terminated |= rep >= 2
         terminated |= MAX_TERMINATION_STEPS <= state.step_count
         return terminated
@@ -278,10 +282,12 @@ class Game:
 
 
 def _update_history(state: GameState):
-    board_history = jnp.roll(state.board_history, 64)
-    board_history = board_history.at[0].set(state.board.astype(jnp.int8))
-    hash_hist = jnp.roll(state.hash_history, 2)
-    hash_hist = hash_hist.at[0].set(_zobrist_hash(state))
+    # Circular buffers: write O(1) instead of rolling O(8×64) + O(101×2) elements.
+    # step_count holds the value BEFORE increment (increment happens after _update_history).
+    bslot = state.step_count % 8
+    hslot = state.step_count % HASH_HISTORY_LEN
+    board_history = state.board_history.at[bslot].set(state.board.astype(jnp.int8))
+    hash_hist = state.hash_history.at[hslot].set(_zobrist_hash(state))
     return state._replace(board_history=board_history, hash_history=hash_hist)
 
 
@@ -430,7 +436,6 @@ def _legal_action_mask(state: GameState) -> Array:
             c0, c1 = from_ // 8, to // 8
             pawn_should = ((c1 == c0) & (board[to] == EMPTY)) | ((c1 != c0) & (board[to] < 0))
             ok &= (piece != PAWN) | pawn_should
-            # check/pin legality via the precomputed masks
             pin_d = pinned_dir[from_]
             non_king_ok = check_target[to] & ((pin_d < 0) | (RAY_DIR[king_pos, to] == pin_d))
             ok &= jnp.where(piece == KING, ~king_danger[to], non_king_ok)

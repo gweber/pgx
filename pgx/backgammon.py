@@ -29,7 +29,7 @@ FALSE = jnp.bool_(False)
 @dataclass
 class State(core.State):
     current_player: Array = jnp.int32(0)
-    observation: Array = jnp.zeros(34, dtype=jnp.int32)
+    observation: Array = jnp.zeros(34, dtype=jnp.int8)
     rewards: Array = jnp.float32([0.0, 0.0])
     terminated: Array = FALSE
     truncated: Array = FALSE
@@ -37,10 +37,10 @@ class State(core.State):
     legal_action_mask: Array = jnp.zeros(6 * 26, dtype=jnp.bool_)
     _step_count: Array = jnp.int32(0)
     # --- Backgammon specific ---
-    # points(24) bar(2) off(2). black+, white-
-    _board: Array = jnp.zeros(28, dtype=jnp.int32)
-    _dice: Array = jnp.zeros(2, dtype=jnp.int32)  # 0~5: 1~6
-    _playable_dice: Array = jnp.zeros(4, dtype=jnp.int32)  # playable dice -1 for empty
+    # points(24) bar(2) off(2). black+, white-; values in [-15,15] → int8
+    _board: Array = jnp.zeros(28, dtype=jnp.int8)
+    _dice: Array = jnp.zeros(2, dtype=jnp.int8)   # 0~5: 1~6
+    _playable_dice: Array = jnp.zeros(4, dtype=jnp.int8)  # playable dice -1 for empty
     _played_dice_num: Array = jnp.int32(0)  # the number of dice played
     _turn: Array = jnp.int32(1)  # black: 0 white:1
 
@@ -137,7 +137,7 @@ def _observe(state: State, player_id: Array) -> Array:
     return jax.lax.cond(
         player_id == state.current_player,
         lambda: jnp.concatenate((board, playable_dice_count_vec), axis=None),  # type: ignore
-        lambda: jnp.concatenate((board, jnp.zeros(6, dtype=jnp.int32)), axis=None),  # type: ignore
+        lambda: jnp.concatenate((board, jnp.zeros(6, dtype=jnp.int8)), axis=None),  # type: ignore
     )
 
 
@@ -151,13 +151,13 @@ def _to_playable_dice_count(playable_dice: Array) -> Array:
     Playable dice: 4, 4, 4, 4
     Return: [0, 0, 0, 0, 4, 0]
     """
-    dice_indices: Array = jnp.array([0, 1, 2, 3], dtype=jnp.int32)  # maximum number of playable dice is 4
+    dice_indices: Array = jnp.array([0, 1, 2, 3], dtype=jnp.int8)  # maximum number of playable dice is 4
 
     def _insert_dice_num(idx: Array, playable_dice: Array) -> Array:
-        vec: Array = jnp.zeros(6, dtype=jnp.int32)
+        vec: Array = jnp.zeros(6, dtype=jnp.int8)
         return (playable_dice[idx] != -1) * vec.at[playable_dice[idx]].set(1) + (playable_dice[idx] == -1) * vec
 
-    return jax.vmap(_insert_dice_num)(dice_indices, jnp.tile(playable_dice, (4, 1))).sum(axis=0, dtype=jnp.int32)
+    return jax.vmap(_insert_dice_num)(dice_indices, jnp.tile(playable_dice, (4, 1))).sum(axis=0, dtype=jnp.int8)
 
 
 def _winning_step(
@@ -229,7 +229,7 @@ def _make_init_board() -> Array:
     """
     Initialize the board based on black's perspective.
     """
-    board: Array = jnp.array([2, 0, 0, 0, 0, -5, 0, -3, 0, 0, 0, 5, -5, 0, 0, 0, 3, 0, 5, 0, 0, 0, 0, -2, 0, 0, 0, 0], dtype=jnp.int32)  # type: ignore
+    board: Array = jnp.array([2, 0, 0, 0, 0, -5, 0, -3, 0, 0, 0, 5, -5, 0, 0, 0, 3, 0, 5, 0, 0, 0, 0, -2, 0, 0, 0, 0], dtype=jnp.int8)  # type: ignore
     return board
 
 
@@ -269,12 +269,12 @@ def _roll_init_dice(rng: PRNGKey) -> Array:
     Roll till the dice are different.
     """
 
-    init_dice_pattern: Array = jnp.array([[0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [1, 0], [1, 2], [1, 3], [1, 4], [1, 5], [2, 0], [2, 1], [2, 3], [2, 4], [2, 5], [3, 0], [3, 1], [3, 2], [3, 4], [3, 5], [4, 0], [4, 1], [4, 2], [4, 3], [4, 5], [5, 0], [5, 1], [5, 2], [5, 3], [5, 4]], dtype=jnp.int32)  # type: ignore
+    init_dice_pattern: Array = jnp.array([[0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [1, 0], [1, 2], [1, 3], [1, 4], [1, 5], [2, 0], [2, 1], [2, 3], [2, 4], [2, 5], [3, 0], [3, 1], [3, 2], [3, 4], [3, 5], [4, 0], [4, 1], [4, 2], [4, 3], [4, 5], [5, 0], [5, 1], [5, 2], [5, 3], [5, 4]], dtype=jnp.int8)  # type: ignore
     return jax.random.choice(rng, init_dice_pattern)
 
 
 def _roll_dice(rng: PRNGKey) -> Array:
-    roll: Array = jax.random.randint(rng, shape=(1, 2), minval=0, maxval=6, dtype=jnp.int32)
+    roll: Array = jax.random.randint(rng, shape=(1, 2), minval=0, maxval=6, dtype=jnp.int8)
     return roll[0]
 
 
@@ -291,8 +291,8 @@ def _set_playable_dice(dice: Array) -> Array:
     """
     -1 for empty
     """
-    return (dice[0] == dice[1]) * jnp.array([dice[0]] * 4, dtype=jnp.int32) + (dice[0] != dice[1]) * jnp.array(
-        [dice[0], dice[1], -1, -1], dtype=jnp.int32
+    return (dice[0] == dice[1]) * jnp.array([dice[0]] * 4, dtype=jnp.int8) + (dice[0] != dice[1]) * jnp.array(
+        [dice[0], dice[1], -1, -1], dtype=jnp.int8
     )
 
 
@@ -303,15 +303,15 @@ def _update_playable_dice(
     action: Array,
 ) -> Array:
     _n = played_dice_num
-    die_array = jnp.array([action % 6] * 4, dtype=jnp.int32)
-    dice_indices: Array = jnp.array([0, 1, 2, 3], dtype=jnp.int32)  # maximum number of playable dice is 4
+    die_array = jnp.array([action % 6] * 4, dtype=jnp.int8)
+    dice_indices: Array = jnp.array([0, 1, 2, 3], dtype=jnp.int8)  # maximum number of playable dice is 4
 
     def _update_for_diff_dice(die: Array, idx: Array, playable_dice: Array):
         return (die == playable_dice[idx]) * -1 + (die != playable_dice[idx]) * playable_dice[idx]
 
     return (dice[0] == dice[1]) * playable_dice.at[3 - _n].set(-1) + (dice[0] != dice[1]) * jax.vmap(
         _update_for_diff_dice
-    )(die_array, dice_indices, jnp.tile(playable_dice, (4, 1))).astype(jnp.int32)
+    )(die_array, dice_indices, jnp.tile(playable_dice, (4, 1))).astype(jnp.int8)
 
 
 def _home_board() -> Array:
@@ -503,34 +503,37 @@ def _remains_at_inner(board: Array) -> bool:
 
 def _legal_action_mask(board: Array, dice: Array) -> Array:
     no_op_mask = jnp.zeros(26 * 6, dtype=jnp.bool_).at[0:6].set(TRUE)
-    legal_action_mask = jax.vmap(partial(_legal_action_mask_for_single_die, board=board))(die=dice).any(
-        axis=0
-    )  # (26 * 6)
+    # Hoist board-only predicates above the outer dice vmap: computed once per step,
+    # not once per die slot (up to 4×).
+    rear = _rear_distance(board)
+    all_on_home = _is_all_on_home_board(board)
+    legal_action_mask = jax.vmap(
+        partial(_legal_action_mask_for_single_die, board=board, rear=rear, all_on_home=all_on_home)
+    )(die=dice).any(axis=0)  # (26 * 6)
     legal_action_exists = ~(legal_action_mask.sum() == 0)
     return (
         legal_action_exists * legal_action_mask + ~legal_action_exists * no_op_mask
     )  # if there is no legal action, no-op is legal
 
 
-def _legal_action_mask_for_single_die(board: Array, die) -> Array:
+def _legal_action_mask_for_single_die(board: Array, die, rear, all_on_home) -> Array:
     """
     Legal action mask for a single die.
     """
     return (die == -1) * jnp.zeros(26 * 6, dtype=jnp.bool_) + (die != -1) * _legal_action_mask_for_valid_single_dice(
-        board, die
+        board, die, rear, all_on_home
     )
 
 
-def _legal_action_mask_for_valid_single_dice(board: Array, die) -> Array:
+def _legal_action_mask_for_valid_single_dice(board: Array, die, rear, all_on_home) -> Array:
     """
     Legal action mask for a single die when the die is valid.
     """
     # micro action = 6 * src + die. Compute the 26 src legalities as a (26,) vector and
     # scatter them into the mask once, instead of materializing a (26, 26 * 6) intermediate
     # (a full zero vector per src, each with a single bit set) and OR-reducing it.
-    # The board-only predicates are computed once here, not per src inside the vmap.
-    rear = _rear_distance(board)
-    all_on_home = _is_all_on_home_board(board)
+    # rear and all_on_home are board-only; they are hoisted above the dice vmap in
+    # _legal_action_mask and passed in here to avoid recomputing them per die slot.
     actions = jnp.arange(26, dtype=jnp.int32) * 6 + die
     legal = jax.vmap(lambda action: _is_action_legal(board, action, rear, all_on_home))(actions)
     return jnp.zeros(26 * 6, dtype=jnp.bool_).at[actions].set(legal)
