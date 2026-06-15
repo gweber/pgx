@@ -188,8 +188,13 @@ class GameState(NamedTuple):
     # 101 entries (current + 100) suffice for exact repetition detection: the game ends at
     # halfmove_count >= 100, so two identical positions can never lie further apart than the
     # halfmove window — any capture/pawn move in between changes the position irreversibly.
-    hash_history: Array = jnp.zeros((HASH_HISTORY_LEN, 2), dtype=jnp.uint32).at[0].set(INIT_ZOBRIST_HASH)
-    board_history: Array = jnp.zeros((8, 64), dtype=jnp.int8).at[0, :].set(INIT_BOARD)
+    # observe()/is_terminal() read the most-recent slot at (step_count-1) % LEN; at the initial
+    # state step_count == 0, so the startpos must live in the slot for step_count-1, i.e. the last
+    # one ((-1) % 101 == 100 for the hash, (-1) % 8 == 7 for the board) — not slot 0. Otherwise the
+    # very first observation reads an empty slot (no pieces) and is_terminal reads a zero hash that
+    # "matches" all the uninitialised rows (spurious 99-fold repetition).
+    hash_history: Array = jnp.zeros((HASH_HISTORY_LEN, 2), dtype=jnp.uint32).at[-1].set(INIT_ZOBRIST_HASH)
+    board_history: Array = jnp.zeros((8, 64), dtype=jnp.int8).at[7, :].set(INIT_BOARD)
     legal_action_mask: Array = INIT_LEGAL_ACTION_MASK
     step_count: Array = jnp.int32(0)
 

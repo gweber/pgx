@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from pgx._src.games.chess import Game, GameState, _flip_pos, _legal_action_mask, _update_history
+from pgx._src.games.chess import HASH_HISTORY_LEN, Game, GameState, _flip_pos, _legal_action_mask, _zobrist_hash
 from pgx.chess import State
 
 TRUE = jnp.bool_(True)
@@ -71,7 +71,19 @@ def from_fen(fen: str):
     x = x._replace(hash_history=jnp.zeros_like(x.hash_history), board_history=jnp.zeros_like(x.board_history))
     legal_action_mask = jax.jit(_legal_action_mask)(x)
     x = x._replace(legal_action_mask=legal_action_mask)
-    x = _update_history(x)
+    # Write the current position to the slot that is_terminal/observe READ, i.e. (step_count-1) %
+    # LEN. In normal play the writer (_update_history) writes step_count % LEN *before* step_count
+    # is incremented, and the readers use (step_count-1) % LEN *after*; from_fen doesn't increment,
+    # so using _update_history here wrote the wrong slot, leaving the read slot zero -> a spurious
+    # 99-fold "repetition" (born-terminated) and an all-empty observation. Writing the read slot
+    # directly keeps step_count semantics and makes the restored state non-terminal.
+    hist_len = x.board_history.shape[0]
+    bslot = (x.step_count - 1) % hist_len
+    hslot = (x.step_count - 1) % HASH_HISTORY_LEN
+    x = x._replace(
+        board_history=x.board_history.at[bslot].set(x.board.astype(jnp.int8)),
+        hash_history=x.hash_history.at[hslot].set(_zobrist_hash(x)),
+    )
 
     player_order = jnp.int32([0, 1])
     state = State(

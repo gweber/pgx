@@ -1070,7 +1070,9 @@ def test_zobrist_hash():
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     state = init(subkey)
-    assert (state._x.hash_history[0] == INIT_ZOBRIST_HASH).all()
+    # the startpos hash now lives in the most-recent slot (step_count-1 == -1), which is where
+    # is_terminal/observe read it; see the GameState history-slot note in _src/games/chess.py.
+    assert (state._x.hash_history[-1] == INIT_ZOBRIST_HASH).all()
     assert (_zobrist_hash(state._x) == INIT_ZOBRIST_HASH).all()
 
 
