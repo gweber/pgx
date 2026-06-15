@@ -1245,3 +1245,23 @@ def test_api():
     env = pgx.make("go_19x19")
     pgx.api_test(env, 3, use_key=False)
     pgx.api_test(env, 3, use_key=True)
+
+
+def test_capture_atari_with_stone_neighbor():
+    """Regression: a 1-liberty chain touching an enemy stone must still be captured.
+
+    The pseudo-liberty atari moments must be summed over EMPTY neighbours only; if stone-neighbour
+    indices leak into idx_sum/idx_sq, the variance identity misfires and the capture is missed.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from pgx._src.games.go import Game
+
+    g = Game(size=9)
+    step = jax.jit(g.step)
+    # corner white stone @80, only liberty 71, with black @79 already; black @71 captures it.
+    s = g.init()
+    for a in [79, 80, 71]:
+        s = step(s, jnp.int32(a))
+    assert int(np.asarray(s.board)[80]) == 0, "1-liberty corner stone next to an enemy stone not captured"

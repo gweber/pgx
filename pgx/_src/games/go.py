@@ -171,10 +171,11 @@ def _apply_action(state: GameState, action, size) -> GameState:
     num_pseudo, idx_sum, idx_squared_sum = state.chain_stats
     chain_ix = jnp.abs(adj_ids) - 1
     is_atari = (idx_sum[chain_ix] ** 2) == idx_squared_sum[chain_ix] * num_pseudo[chain_ix]
-    # When is_atari, num_pseudo==1 so idx_sum == the single liberty's 1-indexed position.
-    # single_liberty is only used in is_killed (ANDed with is_atari), so the value is a
-    # don't-care when not in atari — skip the integer division entirely.
-    single_liberty = idx_sum[chain_ix] - 1
+    # In atari there is exactly one DISTINCT liberty L, but it may be adjacent to several stones of
+    # the chain, so idx_sum == num_pseudo * (L + 1) (not just L + 1). Divide by num_pseudo to recover
+    # L. (The previous `idx_sum - 1` assumed num_pseudo == 1 and missed captures of chains whose
+    # single liberty touches more than one of their stones, e.g. an L-shaped 3-stone chain.)
+    single_liberty = idx_sum[chain_ix] // jnp.maximum(num_pseudo[chain_ix], 1) - 1
     is_killed = (adj_ixs != -1) & (adj_ids * opp_sign > 0) & is_atari & (single_liberty == action)
     surrounded_stones = (state.board[:, None] == adj_ids) & (is_killed[None, :])
     num_captured = jnp.count_nonzero(surrounded_stones)
@@ -210,8 +211,15 @@ def _count(state: GameState, size, adj_mat):
     # Single kernel vs. three separate ones → less launch overhead, better coalescing.
     on_board = adj_mat != -1                                              # (N, 4)
     safe_adj = jnp.where(on_board, adj_mat, 0)                           # clamp -1 safe
-    idx1 = jnp.arange(1, size**2 + 1, dtype=jnp.int32)
-    vals = jnp.stack([is_empty.astype(jnp.int32), idx1, idx1 * idx1], axis=1)  # (N, 3)
+    # The pseudo-liberty moments (idx_sum, idx_sq_sum) must be taken over a chain's EMPTY
+    # neighbours (its liberties) only; the atari identity idx_sum**2 == num_pseudo * idx_sq_sum
+    # relies on that. idx1 / idx1**2 are therefore masked by is_empty (a stone neighbour
+    # contributes 0). Without the mask, stone-neighbour indices leak into the moments and the
+    # identity misfires, so a chain touching another stone is not detected as being in atari and
+    # its capture is missed (e.g. a 1-liberty corner stone next to an enemy stone).
+    e = is_empty.astype(jnp.int32)
+    idx1 = jnp.arange(1, size**2 + 1, dtype=jnp.int32) * e
+    vals = jnp.stack([e, idx1, idx1 * idx1], axis=1)  # (N, 3): empty-neighbour count, idx sum, idx^2 sum
     nb = jnp.where(on_board[:, :, None], vals[safe_adj], 0).sum(axis=1) # (N, 3)
 
     # scatter-add per-point stats into their chains; empties go into an overflow bucket
