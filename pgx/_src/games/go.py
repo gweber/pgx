@@ -245,7 +245,9 @@ def _compute_hash(state: GameState):
     return xor_reduce(to_reduce, 0)
 
 
-def _count_scores(state: GameState, size, adj_mat, enable=True):
+def _count_scores(state: GameState, size, adj_mat=None, enable=True):
+    if adj_mat is None:  # standalone callers (e.g. tests) may omit the precomputed adjacency
+        adj_mat = jax.vmap(_adj_ixs, in_axes=(0, None))(jnp.arange(size**2), size)
     # `enable=False` replaces the board with a fully-occupied dummy whose flood fill converges
     # immediately. rewards() discards the scores of non-terminal states anyway, but under
     # vmap/jit the while_loop below runs as many rounds as the worst board in the batch needs —
@@ -257,7 +259,9 @@ def _count_scores(state: GameState, size, adj_mat, enable=True):
     return jax.vmap(calc_point)(jnp.int32([1, -1]))
 
 
-def _count_ji(state: GameState, color: int, size: int, adj_mat, enable=True):
+def _count_ji(state: GameState, color: int, size: int, adj_mat=None, enable=True):
+    if adj_mat is None:  # standalone callers (e.g. tests) may omit the precomputed adjacency
+        adj_mat = jax.vmap(_adj_ixs, in_axes=(0, None))(jnp.arange(size**2), size)
     board = jnp.clip(state.board * color, -1, 1)  # my stone: 1, opp stone: -1
     board = jnp.where(enable, board, 1)
     # adj_mat: (size**2, 4) precomputed adjacency; -1 means off-board
