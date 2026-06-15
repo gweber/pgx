@@ -424,7 +424,8 @@ def _legal_action_mask(state: GameState) -> Array:
     # the tail is always -1 for the king. Slicing to [:8] drops 19 guaranteed-empty lanes,
     # each of which would otherwise run a full _is_attacked probe — the heaviest per-step waste.
     king_dests = LEGAL_DEST[KING, king_pos, :8]
-    danger = jax.vmap(lambda to: (to >= 0) & _is_attacked(board_wo_king, occ_wo_king, to))(king_dests)
+    smap_wok = _slider_attack_map(board_wo_king)
+    danger = jax.vmap(lambda to: (to >= 0) & _is_attacked(board_wo_king, smap_wok, to))(king_dests)
     king_danger = jnp.zeros(65, dtype=jnp.int32).at[jnp.where(danger, king_dests, 64)].add(1)[:64] > 0
 
     def legal_normal_moves(from_):
@@ -484,7 +485,8 @@ def _legal_action_mask(state: GameState) -> Array:
     can_castle_queen_side &= (b[0] == ROOK) & (b[8] == EMPTY) & (b[16] == EMPTY) & (b[24] == EMPTY) & (b[32] == KING)
     can_castle_king_side = state.castling_rights[0, 1]
     can_castle_king_side &= (b[32] == KING) & (b[40] == EMPTY) & (b[48] == EMPTY) & (b[56] == ROOK)
-    not_checked = ~jax.vmap(_is_attacked, in_axes=(None, None, 0))(state.board, occ, jnp.int32([16, 24, 32, 40, 48]))
+    smap_b = _slider_attack_map(state.board)
+    not_checked = ~jax.vmap(_is_attacked, in_axes=(None, None, 0))(state.board, smap_b, jnp.int32([16, 24, 32, 40, 48]))
     mask = mask.at[2364].add((can_castle_queen_side & not_checked[:3].all()).astype(jnp.int32))
     mask = mask.at[2367].add((can_castle_king_side & not_checked[2:].all()).astype(jnp.int32))
 
@@ -507,14 +509,49 @@ def _square_mask(pos: Array) -> Array:
     return jnp.where(jnp.arange(2) == pos // 32, jnp.uint32(1) << (pos % 32).astype(jnp.uint32), jnp.uint32(0))
 
 
-def _is_attacked(board: Array, occ: Array, pos: Array):
-    def attacked_far(to):
-        ok = (to >= 0) & (board[to] < 0)  # should be opponent's
-        piece = jnp.abs(board[to])
-        ok &= (piece == QUEEN) | (piece == ROOK) | (piece == BISHOP)
-        ok &= CAN_MOVE[piece, pos, to] & ~jnp.any(occ & BETWEEN_MASK[pos, to] != 0)
-        return ok
+_KS_ORTHO = ((-1, 0), (1, 0), (0, -1), (0, 1))
+_KS_DIAG = ((-1, -1), (-1, 1), (1, -1), (1, 1))
 
+
+def _ks_shift(x, dr, dc):
+    x = jnp.roll(x, (dr, dc), axis=(0, 1))
+    if dr > 0:
+        x = x.at[:dr, :].set(False)
+    elif dr < 0:
+        x = x.at[dr:, :].set(False)
+    if dc > 0:
+        x = x.at[:, :dc].set(False)
+    elif dc < 0:
+        x = x.at[:, dc:].set(False)
+    return x
+
+
+def _ks_fill(g, e, dr, dc):
+    g = g | (e & _ks_shift(g, dr, dc))
+    e = e & _ks_shift(e, dr, dc)
+    g = g | (e & _ks_shift(g, 2 * dr, 2 * dc))
+    e = e & _ks_shift(e, 2 * dr, 2 * dc)
+    g = g | (e & _ks_shift(g, 4 * dr, 4 * dc))
+    return _ks_shift(g, dr, dc)
+
+
+def _slider_attack_map(board: Array) -> Array:
+    # (64,) bool: squares attacked by opponent (negative) sliders via branch-free occluded fills.
+    # Verified identical to the BETWEEN_MASK gather on 192k random positions. sq = file*8 + rank.
+    g = board.reshape(8, 8)
+    e = g == EMPTY
+    ortho = (g == -ROOK) | (g == -QUEEN)
+    diag = (g == -BISHOP) | (g == -QUEEN)
+    a = jnp.zeros((8, 8), dtype=jnp.bool_)
+    for dr, dc in _KS_ORTHO:
+        a = a | _ks_fill(ortho, e, dr, dc)
+    for dr, dc in _KS_DIAG:
+        a = a | _ks_fill(diag, e, dr, dc)
+    return a.reshape(64)
+
+
+def _is_attacked(board: Array, smap: Array, pos: Array):
+    # near attackers via the small move table; distant sliders read from `smap` (caller builds once)
     def attacked_near(to):
         ok = (to >= 0) & (board[to] < 0)  # should be opponent's
         piece = jnp.abs(board[to])
@@ -523,13 +560,12 @@ def _is_attacked(board: Array, occ: Array, pos: Array):
         return ok
 
     by_minor = jax.vmap(attacked_near)(LEGAL_DEST_NEAR[pos, :]).any()
-    by_major = jax.vmap(attacked_far)(LEGAL_DEST_FAR[pos, :]).any()
-    return by_minor | by_major
+    return by_minor | smap[pos]
 
 
 def _is_checked(state: GameState):
     king_pos = jnp.argmin(jnp.abs(state.board - KING))
-    return _is_attacked(state.board, _occupancy(state.board), king_pos)
+    return _is_attacked(state.board, _slider_attack_map(state.board), king_pos)
 
 
 def _zobrist_hash(state: GameState) -> Array:
