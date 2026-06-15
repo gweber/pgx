@@ -136,8 +136,8 @@ def test_is_turn_end():
         current_player=jnp.int32(1),
         board=board,
         turn=jnp.int32(1),
-        dice=jnp.array([2, 2], dtype=jnp.int32),
-        playable_dice=jnp.array([-1, -1, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([2, 2], dtype=jnp.int8),
+        playable_dice=jnp.array([-1, -1, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(0),
     )
     assert _is_turn_end(state)
@@ -148,8 +148,8 @@ def test_is_turn_end():
         current_player=jnp.int32(1),
         board=board,
         turn=jnp.int32(1),
-        dice=jnp.array([2, 2], dtype=jnp.int32),
-        playable_dice=jnp.array([-1, -1, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([2, 2], dtype=jnp.int8),
+        playable_dice=jnp.array([-1, -1, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(2),
     )
     assert _is_turn_end(state)
@@ -176,8 +176,8 @@ def test_change_turn():
         current_player=jnp.int32(0),
         board=test_board,
         turn=jnp.int32(0),
-        dice=jnp.array([2, 2], dtype=jnp.int32),
-        playable_dice=jnp.array([-1, -1, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([2, 2], dtype=jnp.int8),
+        playable_dice=jnp.array([-1, -1, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(2),
     )
     state = _change_turn(state, jax.random.PRNGKey(0))
@@ -195,8 +195,8 @@ def test_no_op():
         current_player=jnp.int32(1),
         board=board,
         turn=jnp.int32(1),
-        dice=jnp.array([0, 1], dtype=jnp.int32),
-        playable_dice=jnp.array([0, 1, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([0, 1], dtype=jnp.int8),
+        playable_dice=jnp.array([0, 1, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(0),
         legal_action_mask=legal_action_mask,
     )
@@ -215,8 +215,8 @@ def test_step():
         current_player=jnp.int32(1),
         board=board,
         turn=jnp.int32(1),
-        dice=jnp.array([0, 1], dtype=jnp.int32),
-        playable_dice=jnp.array([0, 1, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([0, 1], dtype=jnp.int8),
+        playable_dice=jnp.array([0, 1, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(0),
         legal_action_mask=legal_action_mask,
     )
@@ -238,7 +238,7 @@ def test_step():
     # White plays die=2 24(bar)->1
     state = step(state=state, action=(1) * 6 + 1, key=jax.random.PRNGKey(0))
     assert (
-            state._playable_dice == jnp.array([0, -1, -1, -1], dtype=jnp.int32)
+            state._playable_dice == jnp.array([0, -1, -1, -1], dtype=jnp.int8)
     ).all()  # Is playable dice updated correctly?
     assert state._played_dice_num == 1  # played dice increased?
     assert state._turn == 1  # turn is not changed?
@@ -267,8 +267,8 @@ def test_step():
         current_player=jnp.int32(0),
         board=board,
         turn=jnp.int32(0),
-        dice=jnp.array([4, 5], dtype=jnp.int32),
-        playable_dice=jnp.array([4, 5, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([4, 5], dtype=jnp.int8),
+        playable_dice=jnp.array([4, 5, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(0),
         legal_action_mask=legal_action_mask,
     )
@@ -297,8 +297,8 @@ def test_observe():
         current_player=jnp.int32(1),
         board=board,
         turn=jnp.int32(1),
-        dice=jnp.array([0, 1], dtype=jnp.int32),
-        playable_dice=jnp.array([0, 1, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([0, 1], dtype=jnp.int8),
+        playable_dice=jnp.array([0, 1, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(0),
     )
     expected_obs = jnp.concatenate(
@@ -310,8 +310,8 @@ def test_observe():
         current_player=jnp.int32(1),
         board=board,
         turn=jnp.int32(1),
-        dice=jnp.array([0, 1], dtype=jnp.int32),
-        playable_dice=jnp.array([1, 1, 1, 1], dtype=jnp.int32),
+        dice=jnp.array([0, 1], dtype=jnp.int8),
+        playable_dice=jnp.array([1, 1, 1, 1], dtype=jnp.int8),
         played_dice_num=jnp.int32(0),
     )
     expected_obs = jnp.concatenate(
@@ -324,8 +324,8 @@ def test_observe():
         current_player=jnp.int32(1),
         board=board,
         turn=jnp.int32(-1),
-        dice=jnp.array([0, 1], dtype=jnp.int32),
-        playable_dice=jnp.array([-1, 1, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([0, 1], dtype=jnp.int8),
+        playable_dice=jnp.array([-1, 1, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(0),
     )
     expected_obs = jnp.concatenate(
@@ -337,8 +337,8 @@ def test_observe():
         current_player=jnp.int32(1),
         board=board,
         turn=jnp.int32(-1),
-        dice=jnp.array([0, 1], dtype=jnp.int32),
-        playable_dice=jnp.array([-1, 1, -1, -1], dtype=jnp.int32),
+        dice=jnp.array([0, 1], dtype=jnp.int8),
+        playable_dice=jnp.array([-1, 1, -1, -1], dtype=jnp.int8),
         played_dice_num=jnp.int32(0),
     )
     expected_obs = jnp.concatenate(
@@ -481,7 +481,7 @@ def test_move():
 def test_legal_action():
     board = make_test_boad()
     # black
-    playable_dice = jnp.array([3, 2, -1, -1], dtype=jnp.int32)
+    playable_dice = jnp.array([3, 2, -1, -1], dtype=jnp.int8)
     expected_legal_action_mask: jnp.ndarray = jnp.zeros(
         6 * 26, dtype=jnp.bool_
     )
@@ -510,7 +510,7 @@ def test_legal_action():
     print(jnp.where(expected_legal_action_mask != 0)[0])
     assert (expected_legal_action_mask == legal_action_mask).all()
 
-    playable_dice = jnp.array([5, 5, 5, 5], dtype=jnp.int32)
+    playable_dice = jnp.array([5, 5, 5, 5], dtype=jnp.int8)
     expected_legal_action_mask = jnp.zeros(6 * 26, dtype=jnp.bool_)
     expected_legal_action_mask = expected_legal_action_mask.at[
         6 * (19 + 2) + 5
@@ -520,7 +520,7 @@ def test_legal_action():
 
     # white
     board = _flip_board(board)
-    playable_dice = jnp.array([4, 1, -1, -1], dtype=jnp.int32)
+    playable_dice = jnp.array([4, 1, -1, -1], dtype=jnp.int8)
     expected_legal_action_mask: jnp.ndarray = jnp.zeros(
         6 * 26, dtype=jnp.bool_
     )
@@ -530,7 +530,7 @@ def test_legal_action():
     legal_action_mask = _legal_action_mask(board, playable_dice)
     assert (expected_legal_action_mask == legal_action_mask).all()
 
-    playable_dice = jnp.array([4, 4, 4, 4], dtype=jnp.int32)
+    playable_dice = jnp.array([4, 4, 4, 4], dtype=jnp.int8)
     expected_legal_action_mask = jnp.zeros(
         6 * 26, dtype=jnp.bool_
     )  # dance
